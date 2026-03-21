@@ -81,13 +81,28 @@ jobs:
           done
           docker logs iscsi-target
 
-      - name: iSCSI protocol test (login + SendTargets)
+      - name: Install open-iscsi (iscsiadm)
+        run: sudo apt-get install -y open-iscsi
+
+      - name: iSCSI protocol test (SendTargets discovery + login)
         run: |
-          python3 tests/integration/test_target.py
-        env:
-          ISCSI_HOST: 127.0.0.1
-          ISCSI_PORT: 3260
-          EXPECTED_IQN: iqn.2024-01.io.iscsid-mac:test
+          # SendTargets discovery
+          iscsiadm -m discovery -t st -p 127.0.0.1:3260 | tee /tmp/discovery.out
+          grep -q "iqn.2024-01.io.iscsid-mac:test" /tmp/discovery.out
+
+          # Log in to the target
+          iscsiadm -m node \
+            -T iqn.2024-01.io.iscsid-mac:test \
+            -p 127.0.0.1:3260 --login
+
+          # Verify session is active
+          iscsiadm -m session | tee /tmp/session.out
+          grep -q "iqn.2024-01.io.iscsid-mac:test" /tmp/session.out
+
+          # Log out cleanly
+          iscsiadm -m node \
+            -T iqn.2024-01.io.iscsid-mac:test \
+            -p 127.0.0.1:3260 --logout
 
       - name: Collect logs on failure
         if: failure()
