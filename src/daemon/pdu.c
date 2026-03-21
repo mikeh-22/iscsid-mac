@@ -16,19 +16,33 @@
  * Internal helpers
  * ----------------------------------------------------------------------- */
 
-/* Fully write len bytes from buf to fd. */
-static int write_all(int fd, const void *buf, size_t len)
+/*
+ * Send all bytes described by iov[iovcnt] in a single writev(2) call,
+ * looping only on EINTR or a (rare) partial write.
+ */
+static int writev_all(int fd, struct iovec *iov, int iovcnt, size_t total)
 {
-    const uint8_t *p = buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
+    size_t sent = 0;
+    while (sent < total) {
+        ssize_t n = writev(fd, iov, iovcnt);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -errno;
         }
         if (n == 0) return -EIO;
-        p   += n;
-        len -= (size_t)n;
+        sent += (size_t)n;
+        if (sent >= total) break;
+        /* Advance iov past the bytes already sent (partial write path) */
+        size_t skip = (size_t)n;
+        while (iovcnt > 0 && skip >= iov->iov_len) {
+            skip -= iov->iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && skip > 0) {
+            iov->iov_base = (uint8_t *)iov->iov_base + skip;
+            iov->iov_len -= skip;
+        }
     }
     return 0;
 }
@@ -101,25 +115,37 @@ void pdu_free_data(iscsi_pdu_t *pdu)
 
 int pdu_send(int fd, const iscsi_pdu_t *pdu)
 {
-    int rc;
+    /*
+     * Coalesce header + data + padding into a single writev(2) call so
+     * that TCP_NODELAY flushes exactly one segment per PDU instead of
+     * two or three (one per write).  iov_base is void* so we cast away
+     * const — safe because writev only reads from these buffers.
+     */
+    static const uint8_t zeros[3] = {0, 0, 0};
+    struct iovec iov[3];
+    int iovcnt = 0;
+    size_t total = ISCSI_HDR_LEN;
 
-    rc = write_all(fd, &pdu->hdr, ISCSI_HDR_LEN);
-    if (rc) return rc;
+    iov[iovcnt].iov_base = (void *)(uintptr_t)&pdu->hdr;
+    iov[iovcnt].iov_len  = ISCSI_HDR_LEN;
+    iovcnt++;
 
     if (pdu->data_len > 0) {
-        rc = write_all(fd, pdu->data, pdu->data_len);
-        if (rc) return rc;
+        iov[iovcnt].iov_base = pdu->data;
+        iov[iovcnt].iov_len  = pdu->data_len;
+        total += pdu->data_len;
+        iovcnt++;
 
-        /* Pad data segment to 4-byte boundary */
         uint32_t pad = iscsi_pad4(pdu->data_len) - pdu->data_len;
         if (pad > 0) {
-            static const uint8_t zeros[3] = {0, 0, 0};
-            rc = write_all(fd, zeros, pad);
-            if (rc) return rc;
+            iov[iovcnt].iov_base = (void *)(uintptr_t)zeros;
+            iov[iovcnt].iov_len  = pad;
+            total += pad;
+            iovcnt++;
         }
     }
 
-    return 0;
+    return writev_all(fd, iov, iovcnt, total);
 }
 
 int pdu_recv(int fd, iscsi_pdu_t *pdu)

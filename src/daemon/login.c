@@ -368,7 +368,6 @@ login_result_t iscsi_login(iscsi_session_t *sess, iscsi_conn_t *conn)
     int rc;
 
     conn->state = CONN_STATE_IN_LOGIN;
-    conn_set_nodelay(conn);
 
     /* Security phase */
     if (sess->chap_secret[0]) {

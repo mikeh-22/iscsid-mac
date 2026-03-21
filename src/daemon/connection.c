@@ -51,6 +51,28 @@ iscsi_conn_t *conn_create(const char *host, uint16_t port)
         return NULL;
     }
 
+    /*
+     * Size the socket buffers to match MaxRecvDataSegmentLength (256 KiB).
+     * The kernel default on macOS is ~128 KiB, which falls below the PDU
+     * data segment limit and causes receiver-side flow control stalls under
+     * sustained workloads.  The kernel may round up to the next power of two.
+     */
+    int bufsize = ISCSI_CONN_RECV_BUFSIZE;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) < 0)
+        fprintf(stderr, "conn: SO_RCVBUF: %s\n", strerror(errno));
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize)) < 0)
+        fprintf(stderr, "conn: SO_SNDBUF: %s\n", strerror(errno));
+
+    /*
+     * Disable Nagle: iSCSI PDUs are complete messages; we never want the
+     * kernel to hold a partially-filled segment waiting for more data.
+     * Set here rather than during login so it applies to the full connection
+     * lifetime, including any future SCSI I/O path.
+     */
+    int nodelay = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0)
+        fprintf(stderr, "conn: TCP_NODELAY: %s\n", strerror(errno));
+
     iscsi_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) {
         close(fd);
