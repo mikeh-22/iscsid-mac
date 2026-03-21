@@ -1,0 +1,47 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan on Mondays at 08:00 UTC (catches new CVEs between pushes)
+    - cron: "0 8 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (C)
+    runs-on: macos-15
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: brew install cmake
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          # Use the security-extended query suite for a broader set of
+          # vulnerability checks beyond the default security-and-quality set.
+          queries: security-extended
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64
+
+      - name: Build (CodeQL traces compilation)
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
