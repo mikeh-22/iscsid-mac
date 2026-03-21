@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    LaunchDaemon plist for iscsid-mac.
+    Install to /Library/LaunchDaemons/io.iscsid-mac.plist
+    Then: sudo launchctl load /Library/LaunchDaemons/io.iscsid-mac.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.iscsid-mac</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/sbin/iscsid</string>
+        <string>-f</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/iscsid.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/iscsid.log</string>
+
+    <!-- Require network before starting -->
+    <key>NetworkState</key>
+    <true/>
+</dict>
+</plist>

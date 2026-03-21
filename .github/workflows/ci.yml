@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Build + unit tests on macOS (arm64 and x86_64)
+  # -------------------------------------------------------------------------
+  build-and-test:
+    name: Build & test (${{ matrix.os }}, ${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-13]        # arm64 and x86_64 hosted runners
+        build_type: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: brew install cmake
+
+      - name: Configure (${{ matrix.build_type }})
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_OSX_ARCHITECTURES=$(uname -m)
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Unit tests
+        run: ctest --test-dir build -V --output-on-failure
+
+      - name: Upload binaries
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: iscsid-mac-${{ matrix.os }}
+          path: |
+            build/iscsid
+            build/iscsictl
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Integration test: daemon + iscsictl against a real tgt iSCSI target
+  # Runs on a Linux runner (Docker available), cross-compiling is not needed
+  # because we test the protocol logic via the Docker target only; the daemon
+  # itself is macOS-only and tested above. Here we validate the Docker target
+  # image builds and the test harness works.
+  # -------------------------------------------------------------------------
+  integration-test:
+    name: Integration test (Docker target)
+    runs-on: macos-15          # macOS 15 runners are arm64 and have Docker via colima
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake colima docker docker-buildx
+
+      - name: Start colima (Docker runtime for macOS CI)
+        run: |
+          colima start --arch aarch64 --vm-type vz --vz-rosetta --cpu 2 --memory 4
+          # Wait for Docker socket to be ready
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break || sleep 2; done
+          docker info
+
+      - name: Configure & build (Release)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=$(uname -m)
+          cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Build iSCSI target image
+        run: docker build -t iscsid-mac-target tests/target/
+
+      - name: Start iSCSI target
+        run: |
+          docker run -d --name iscsi-target --privileged -p 3260:3260 iscsid-mac-target
+          # Wait for tgtd to be ready
+          sleep 3
+          docker logs iscsi-target
+
+      - name: Start iscsid daemon
+        run: |
+          ./build/iscsid -s /tmp/iscsid-test.sock -f -d &
+          echo $! > /tmp/iscsid.pid
+          sleep 1
+
+      - name: ping
+        run: ./build/iscsictl -s /tmp/iscsid-test.sock ping
+
+      - name: discover
+        run: |
+          ./build/iscsictl -s /tmp/iscsid-test.sock discover -h 127.0.0.1 -p 3260 \
+            | tee /tmp/discover.out
+          grep -q "iqn.2024-01.io.iscsid-mac:test" /tmp/discover.out
+
+      - name: login
+        run: |
+          ./build/iscsictl -s /tmp/iscsid-test.sock \
+            login -h 127.0.0.1 -p 3260 -t iqn.2024-01.io.iscsid-mac:test
+
+      - name: list (expect LOGGED_IN)
+        run: |
+          ./build/iscsictl -s /tmp/iscsid-test.sock list | tee /tmp/list.out
+          grep -q "LOGGED_IN" /tmp/list.out
+
+      - name: logout
+        run: |
+          ./build/iscsictl -s /tmp/iscsid-test.sock \
+            logout -t iqn.2024-01.io.iscsid-mac:test
+
+      - name: list (expect empty)
+        run: |
+          ./build/iscsictl -s /tmp/iscsid-test.sock list | tee /tmp/list2.out
+          grep -q "No active sessions" /tmp/list2.out
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== daemon stderr ==="
+          cat /tmp/iscsid-*.log 2>/dev/null || true
+          echo "=== docker target logs ==="
+          docker logs iscsi-target 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill $(cat /tmp/iscsid.pid) 2>/dev/null || true
+          docker stop iscsi-target 2>/dev/null || true
+          docker rm iscsi-target 2>/dev/null || true
+          colima stop 2>/dev/null || true

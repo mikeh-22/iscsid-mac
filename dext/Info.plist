@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Info.plist for the iSCSIInitiator DriverKit system extension.
+
+    Required entitlements (provisioning profile):
+      com.apple.developer.driverkit                          = true
+      com.apple.developer.driverkit.family.scsicontroller   = true
+      com.apple.developer.driverkit.allow-any-userclient-access = true
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.iscsid-mac.dext</string>
+    <key>CFBundleName</key>
+    <string>iSCSIInitiator</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>iSCSIInitiator</string>
+    <key>CFBundlePackageType</key>
+    <string>DEXT</string>
+
+    <!-- IOKit matching: match on our custom provider -->
+    <key>IOKitPersonalities</key>
+    <dict>
+        <key>iSCSIInitiator</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>io.iscsid-mac.dext</string>
+            <key>IOClass</key>
+            <string>IOUserSCSIParallelInterfaceController</string>
+            <key>IOUserClass</key>
+            <string>iSCSIInitiator</string>
+            <!-- Virtual provider — matched by iscsid when it sets up the
+                 virtual SCSI adapter via IOService::Create() -->
+            <key>IOProviderClass</key>
+            <string>IOiSCSIHBA</string>
+            <key>IOPropertyMatch</key>
+            <dict>
+                <key>iSCSI Initiator</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+
+    <!-- DriverKit requires these keys -->
+    <key>OSBundleUsageDescription</key>
+    <string>iSCSI Initiator - provides iSCSI storage over network</string>
+</dict>
+</plist>

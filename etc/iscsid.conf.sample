@@ -1,0 +1,30 @@
+# iscsid-mac configuration file
+# Copy to /etc/iscsid.conf and customise.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# ---- Authentication ----
+# Authentication method: None or CHAP
+# node.session.auth.authmethod = CHAP
+
+# CHAP credentials (initiator authenticating to target)
+# node.session.auth.username = iqn.2024-01.io.example:myinitiator
+# node.session.auth.password = my-secret-at-least-12-bytes
+
+# Mutual CHAP (target authenticates back to us)
+# node.session.auth.username_in = iqn.2024-01.io.example:mytarget
+# node.session.auth.password_in = target-secret-12bytes
+
+# ---- Session parameters ----
+# node.session.iscsi.MaxBurstLength = 262144
+# node.session.iscsi.FirstBurstLength = 65536
+# node.session.iscsi.MaxRecvDataSegmentLength = 262144
+# node.session.iscsi.InitialR2T = Yes
+# node.session.iscsi.ImmediateData = Yes
+# node.session.iscsi.ErrorRecoveryLevel = 0
+# node.session.iscsi.MaxConnections = 1
+
+# ---- Daemon settings ----
+# iscsid.pid_file = /var/run/iscsid.pid
+# iscsid.socket_path = /var/run/iscsid.sock
+# iscsid.debug = 0
