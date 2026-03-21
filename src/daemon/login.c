@@ -61,7 +61,8 @@ static int send_login(iscsi_conn_t *conn, iscsi_session_t *sess,
     build_login_req((iscsi_login_req_t *)&pdu.hdr,
                     sess, conn, csg, nsg, transit, kv_len);
     if (kv_len > 0) pdu_set_data_ref(&pdu, kv, kv_len);
-    return pdu_send(conn->fd, &pdu);
+    /* Digests are negotiated during login but take effect only in FFP */
+    return pdu_send(conn->fd, &pdu, 0, 0);
 }
 
 /* Receive one login response.  Updates conn->exp_statsn and session SN window.
@@ -69,7 +70,8 @@ static int send_login(iscsi_conn_t *conn, iscsi_session_t *sess,
 static int recv_login(iscsi_conn_t *conn, iscsi_session_t *sess,
                       iscsi_pdu_t *pdu_out)
 {
-    int rc = pdu_recv(conn->fd, pdu_out);
+    /* Digests not yet active during login phase */
+    int rc = pdu_recv(conn->fd, pdu_out, 0, 0);
     if (rc) return LOGIN_IO_ERROR;
 
     iscsi_login_rsp_t *rsp = (iscsi_login_rsp_t *)&pdu_out->hdr;
@@ -290,8 +292,9 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
     snprintf(tmp, sizeof(tmp), "%u", sess->params.error_recovery_level);
     used = pdu_kv_append(kv, sizeof(kv), used, "ErrorRecoveryLevel", tmp);
 
-    used = pdu_kv_append(kv, sizeof(kv), used, "HeaderDigest", "None");
-    used = pdu_kv_append(kv, sizeof(kv), used, "DataDigest",   "None");
+    /* Offer CRC32C as preferred; fall back to None if target declines */
+    used = pdu_kv_append(kv, sizeof(kv), used, "HeaderDigest", "CRC32C,None");
+    used = pdu_kv_append(kv, sizeof(kv), used, "DataDigest",   "CRC32C,None");
 
     if (sess->type == SESS_TYPE_NORMAL) {
         snprintf(tmp, sizeof(tmp), "%u", sess->params.max_connections);
@@ -353,6 +356,18 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
             sess->params.initial_r2t = (strcmp(v, "Yes") == 0);
         if ((v = pdu_kv_get((char *)rsp.data, rsp.data_len, "ImmediateData")))
             sess->params.immediate_data = (strcmp(v, "Yes") == 0);
+
+        /* Digest selection: target echoes back a single value from our list */
+        if ((v = pdu_kv_get((char *)rsp.data, rsp.data_len, "HeaderDigest")))
+            conn->header_digest = (strcmp(v, "CRC32C") == 0) ? 1 : 0;
+        if ((v = pdu_kv_get((char *)rsp.data, rsp.data_len, "DataDigest")))
+            conn->data_digest   = (strcmp(v, "CRC32C") == 0) ? 1 : 0;
+    }
+
+    if (conn->header_digest || conn->data_digest) {
+        printf("login: digests active —%s%s\n",
+               conn->header_digest ? " HeaderDigest=CRC32C" : "",
+               conn->data_digest   ? " DataDigest=CRC32C"   : "");
     }
 
     pdu_free_data(&rsp);
@@ -411,11 +426,12 @@ int iscsi_logout(iscsi_session_t *sess, iscsi_conn_t *conn, uint8_t reason)
 
     conn->state = CONN_STATE_IN_LOGOUT;
 
-    int rc = pdu_send(conn->fd, &pdu);
+    /* Logout runs in Full Feature Phase — use negotiated digest settings */
+    int rc = pdu_send(conn->fd, &pdu, conn->header_digest, conn->data_digest);
     if (rc) return rc;
 
     iscsi_pdu_t rsp;
-    rc = pdu_recv(conn->fd, &rsp);
+    rc = pdu_recv(conn->fd, &rsp, conn->header_digest, conn->data_digest);
     if (rc) return rc;
 
     if ((rsp.hdr.opcode & 0x3f) != ISCSI_OP_LOGOUT_RSP) {

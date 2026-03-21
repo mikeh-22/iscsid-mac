@@ -5,6 +5,8 @@
  */
 
 #include "pdu.h"
+#include "digest.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,16 +115,23 @@ void pdu_free_data(iscsi_pdu_t *pdu)
  * I/O
  * ----------------------------------------------------------------------- */
 
-int pdu_send(int fd, const iscsi_pdu_t *pdu)
+int pdu_send(int fd, const iscsi_pdu_t *pdu, int hdr_digest, int data_digest)
 {
     /*
-     * Coalesce header + data + padding into a single writev(2) call so
-     * that TCP_NODELAY flushes exactly one segment per PDU instead of
-     * two or three (one per write).  iov_base is void* so we cast away
-     * const — safe because writev only reads from these buffers.
+     * Wire layout (RFC 7143 §6.7):
+     *   [48-byte header] [4-byte header CRC?]
+     *   [data segment]   [padding 0-3 bytes] [4-byte data CRC?]
+     *
+     * All segments are coalesced into a single writev(2) call — one syscall,
+     * one TCP segment with TCP_NODELAY active.  Max 5 iovecs.
+     *
+     * iov_base requires void*, so we cast away const via uintptr_t — safe
+     * because writev only reads from these buffers.
      */
     static const uint8_t zeros[3] = {0, 0, 0};
-    struct iovec iov[3];
+    uint32_t hdr_crc_be = 0;
+    uint32_t data_crc_be = 0;
+    struct iovec iov[5];
     int iovcnt = 0;
     size_t total = ISCSI_HDR_LEN;
 
@@ -130,17 +139,37 @@ int pdu_send(int fd, const iscsi_pdu_t *pdu)
     iov[iovcnt].iov_len  = ISCSI_HDR_LEN;
     iovcnt++;
 
+    if (hdr_digest) {
+        hdr_crc_be = htonl(crc32c(&pdu->hdr, ISCSI_HDR_LEN));
+        iov[iovcnt].iov_base = &hdr_crc_be;
+        iov[iovcnt].iov_len  = 4;
+        total += 4;
+        iovcnt++;
+    }
+
     if (pdu->data_len > 0) {
+        uint32_t pad = iscsi_pad4(pdu->data_len) - pdu->data_len;
+
         iov[iovcnt].iov_base = pdu->data;
         iov[iovcnt].iov_len  = pdu->data_len;
         total += pdu->data_len;
         iovcnt++;
 
-        uint32_t pad = iscsi_pad4(pdu->data_len) - pdu->data_len;
         if (pad > 0) {
             iov[iovcnt].iov_base = (void *)(uintptr_t)zeros;
             iov[iovcnt].iov_len  = pad;
             total += pad;
+            iovcnt++;
+        }
+
+        if (data_digest) {
+            uint32_t crc = crc32c(pdu->data, pdu->data_len);
+            if (pad > 0)
+                crc = crc32c_extend(crc, zeros, pad);
+            data_crc_be = htonl(crc);
+            iov[iovcnt].iov_base = &data_crc_be;
+            iov[iovcnt].iov_len  = 4;
+            total += 4;
             iovcnt++;
         }
     }
@@ -148,7 +177,7 @@ int pdu_send(int fd, const iscsi_pdu_t *pdu)
     return writev_all(fd, iov, iovcnt, total);
 }
 
-int pdu_recv(int fd, iscsi_pdu_t *pdu)
+int pdu_recv(int fd, iscsi_pdu_t *pdu, int hdr_digest, int data_digest)
 {
     int rc;
 
@@ -156,6 +185,19 @@ int pdu_recv(int fd, iscsi_pdu_t *pdu)
 
     rc = read_all(fd, &pdu->hdr, ISCSI_HDR_LEN);
     if (rc) return rc;
+
+    if (hdr_digest) {
+        uint32_t received_crc_be;
+        rc = read_all(fd, &received_crc_be, 4);
+        if (rc) return rc;
+        uint32_t computed = crc32c(&pdu->hdr, ISCSI_HDR_LEN);
+        if (ntohl(received_crc_be) != computed) {
+            fprintf(stderr, "pdu: header digest mismatch "
+                    "(got 0x%08x, expected 0x%08x)\n",
+                    ntohl(received_crc_be), computed);
+            return -EBADMSG;
+        }
+    }
 
     uint32_t dlen = iscsi_dlength_get(pdu->hdr.dlength);
     if (dlen == 0) return 0;
@@ -184,6 +226,25 @@ int pdu_recv(int fd, iscsi_pdu_t *pdu)
 
     pdu->data[dlen] = '\0';   /* NUL-terminate; padding bytes already read */
     pdu->data_len = dlen;
+
+    if (data_digest) {
+        uint32_t received_crc_be;
+        rc = read_all(fd, &received_crc_be, 4);
+        if (rc) {
+            pdu_free_data(pdu);
+            return rc;
+        }
+        /* Digest covers data segment including padding (RFC 7143 §6.7.2) */
+        uint32_t computed = crc32c(pdu->data, padded);
+        if (ntohl(received_crc_be) != computed) {
+            fprintf(stderr, "pdu: data digest mismatch "
+                    "(got 0x%08x, expected 0x%08x)\n",
+                    ntohl(received_crc_be), computed);
+            pdu_free_data(pdu);
+            return -EBADMSG;
+        }
+    }
+
     return 0;
 }
 

@@ -128,7 +128,7 @@ static void test_pdu_sendrecv(void)
     const char *payload = "Hello, iSCSI!";
     pdu_set_data_copy(&tx, payload, (uint32_t)strlen(payload));
 
-    if (pdu_send(sv[0], &tx) != 0) {
+    if (pdu_send(sv[0], &tx, 0, 0) != 0) {
         FAIL("pdu_send failed");
         close(sv[0]); close(sv[1]);
         pdu_free_data(&tx);
@@ -136,7 +136,7 @@ static void test_pdu_sendrecv(void)
     }
 
     iscsi_pdu_t rx;
-    int rc = pdu_recv(sv[1], &rx);
+    int rc = pdu_recv(sv[1], &rx, 0, 0);
     close(sv[0]); close(sv[1]);
 
     if (rc != 0) {

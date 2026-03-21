@@ -64,6 +64,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src/shared)
 
 set(LIB_SOURCES
     src/daemon/pdu.c
+    src/daemon/digest.c
     src/daemon/auth.c
     src/daemon/connection.c
     src/daemon/session.c
@@ -107,6 +108,10 @@ add_test(NAME test_pdu COMMAND test_pdu)
 add_executable(test_auth tests/test_auth.c)
 target_link_libraries(test_auth PRIVATE iscsid_lib)
 add_test(NAME test_auth COMMAND test_auth)
+
+add_executable(test_digest tests/test_digest.c)
+target_link_libraries(test_digest PRIVATE iscsid_lib)
+add_test(NAME test_digest COMMAND test_digest)
 
 # ---------------------------------------------------------------------------
 # Installation

@@ -159,7 +159,7 @@ int iscsi_discover(const char *host, uint16_t port,
     iscsi_dlength_set(treq->dlength, (uint32_t)kv_len);
     pdu_set_data_ref(&req_pdu, kv, (uint32_t)kv_len);
 
-    int rc = pdu_send(conn->fd, &req_pdu);
+    int rc = pdu_send(conn->fd, &req_pdu, conn->header_digest, conn->data_digest);
     if (rc) {
         fprintf(stderr, "discover: send text request failed: %s\n",
                 strerror(-rc));
@@ -175,7 +175,7 @@ int iscsi_discover(const char *host, uint16_t port,
 
     while (!done) {
         iscsi_pdu_t rsp;
-        rc = pdu_recv(conn->fd, &rsp);
+        rc = pdu_recv(conn->fd, &rsp, conn->header_digest, conn->data_digest);
         if (rc) {
             fprintf(stderr, "discover: recv text response failed\n");
             free(text_buf);

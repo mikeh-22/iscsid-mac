@@ -40,18 +40,26 @@ void pdu_free_data(iscsi_pdu_t *pdu);
 
 /*
  * Send a PDU on fd.
- * Writes the 48-byte header then the data segment (padded to 4 bytes).
+ * Writes header [+ 4-byte CRC] + data segment + padding [+ 4-byte CRC]
+ * in a single writev(2) call.
+ *
+ * hdr_digest / data_digest: non-zero to append CRC32C (RFC 7143 §6.7).
+ * Pass 0 for both during the Login phase (digests apply in FFP only).
+ *
  * Returns 0 on success, -errno on error.
  */
-int pdu_send(int fd, const iscsi_pdu_t *pdu);
+int pdu_send(int fd, const iscsi_pdu_t *pdu, int hdr_digest, int data_digest);
 
 /*
  * Receive a PDU from fd.
- * Reads the 48-byte header, then allocates and reads the data segment.
- * The caller must call pdu_free_data() when done.
- * Returns 0 on success, -errno on error, 1 on clean peer close.
+ * Reads the 48-byte header, verifies the header CRC if hdr_digest is set,
+ * allocates and reads the data segment, verifies the data CRC if data_digest
+ * is set.  The caller must call pdu_free_data() when done.
+ *
+ * Returns 0 on success, -errno on error, 1 on clean peer close,
+ * -EBADMSG on digest mismatch.
  */
-int pdu_recv(int fd, iscsi_pdu_t *pdu);
+int pdu_recv(int fd, iscsi_pdu_t *pdu, int hdr_digest, int data_digest);
 
 /* -----------------------------------------------------------------------
  * Key=Value text helpers
