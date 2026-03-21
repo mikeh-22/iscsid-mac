@@ -1,5 +1,9 @@
 # iscsid-mac
 
+[![CI](https://github.com/mikeh-22/iscsid-mac/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeh-22/iscsid-mac/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mikeh-22/iscsid-mac/actions/workflows/codeql.yml/badge.svg)](https://github.com/mikeh-22/iscsid-mac/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 An open-source iSCSI initiator daemon for macOS, implementing [RFC 7143](https://www.rfc-editor.org/rfc/rfc7143) in userspace.
 
 Apple shipped a proprietary iSCSI initiator through macOS High Sierra (10.13) and then removed it. This project replaces it with a clean, open implementation targeting modern macOS on Apple Silicon.
@@ -45,7 +49,7 @@ Apple shipped a proprietary iSCSI initiator through macOS High Sierra (10.13) an
 ## Building
 
 ```sh
-git clone https://github.com/your-org/iscsid-mac
+git clone https://github.com/mikeh-22/iscsid-mac
 cd iscsid-mac
 
 # Debug build (includes AddressSanitizer + UBSan)
@@ -68,6 +72,8 @@ build/test_auth     # CHAP auth unit tests
 
 ## Testing
 
+### Unit tests
+
 ```sh
 ctest --test-dir build -V
 ```
@@ -88,6 +94,31 @@ ctest --test-dir build -V
   chap_parse_challenge from KV buffer               PASS
   chap_parse_challenge rejects wrong algorithm      PASS
 ```
+
+### Integration tests (Docker)
+
+`tests/target/` contains a Dockerised [tgt](https://github.com/fujita/tgt) iSCSI target used in CI. To run the full end-to-end flow locally:
+
+```sh
+# Start the target
+docker build -t iscsid-mac-target tests/target/
+docker run -d --name iscsi-target --privileged -p 3260:3260 iscsid-mac-target
+
+# Start the daemon (no root needed with a custom socket path)
+./build/iscsid -s /tmp/iscsid-test.sock -f -d &
+
+# Exercise the daemon
+./build/iscsictl -s /tmp/iscsid-test.sock discover -h 127.0.0.1 -p 3260
+./build/iscsictl -s /tmp/iscsid-test.sock login    -h 127.0.0.1 -p 3260 \
+    -t iqn.2024-01.io.iscsid-mac:test
+./build/iscsictl -s /tmp/iscsid-test.sock list
+./build/iscsictl -s /tmp/iscsid-test.sock logout   -t iqn.2024-01.io.iscsid-mac:test
+
+# Teardown
+docker stop iscsi-target && docker rm iscsi-target
+```
+
+CI runs this end-to-end test automatically on every push and pull request.
 
 ## Usage
 
@@ -206,8 +237,13 @@ iscsid-mac/
 │   ├── iSCSIInitiator.cpp/h   # DriverKit SCSI controller
 │   └── Info.plist
 ├── tests/
-│   ├── test_pdu.c
-│   └── test_auth.c
+│   ├── test_pdu.c             # PDU encode/decode unit tests
+│   ├── test_auth.c            # CHAP auth unit tests
+│   ├── integration/
+│   │   └── test_target.py     # Raw iSCSI protocol smoke test
+│   └── target/
+│       ├── Dockerfile         # Ubuntu + tgt iSCSI target (used in CI)
+│       └── entrypoint.sh
 ├── etc/
 │   ├── iscsid.conf.sample
 │   └── io.iscsid-mac.plist    # LaunchDaemon
@@ -218,6 +254,10 @@ iscsid-mac/
 
 - [iscsi-osx/iSCSIInitiator](https://github.com/iscsi-osx/iSCSIInitiator) — prior open-source attempt using a kernel extension; development stalled when Apple deprecated kexts and DriverKit lacked socket support
 - [open-iscsi](https://github.com/open-iscsi/open-iscsi) — Linux reference implementation
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for code style, test requirements, and the PR checklist. To report a security vulnerability, follow the process in [SECURITY.md](SECURITY.md).
 
 ## License
 
