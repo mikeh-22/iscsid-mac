@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install cmake colima docker
+        run: brew install cmake qemu colima docker
 
       - name: Configure & build (Release)
         run: |
