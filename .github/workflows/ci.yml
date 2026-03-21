@@ -81,8 +81,11 @@ jobs:
           done
           docker logs iscsi-target
 
-      - name: Install open-iscsi (iscsiadm)
-        run: sudo apt-get install -y open-iscsi
+      - name: Install and start open-iscsi
+        run: |
+          sudo apt-get install -y open-iscsi
+          sudo modprobe iscsi_tcp || true
+          sudo systemctl start iscsid
 
       - name: iSCSI protocol test (SendTargets discovery + login)
         run: |
