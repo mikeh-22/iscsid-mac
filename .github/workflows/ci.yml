@@ -84,13 +84,15 @@ jobs:
       - name: Install and start open-iscsi
         run: |
           sudo apt-get install -y open-iscsi
-          sudo modprobe iscsi_tcp || true
+          sudo modprobe iscsi_tcp 2>&1 && echo "iscsi_tcp loaded" || echo "WARN: iscsi_tcp not loadable"
+          lsmod | grep iscsi || echo "No iscsi modules in lsmod"
           sudo systemctl start iscsid
+          sudo systemctl status iscsid --no-pager
 
       - name: iSCSI protocol test (SendTargets discovery + login)
         run: |
-          # SendTargets discovery
-          sudo iscsiadm -m discovery -t st -p 127.0.0.1:3260 | tee /tmp/discovery.out
+          # SendTargets discovery (debug level 2 for verbose output)
+          sudo iscsiadm -d 2 -m discovery -t st -p 127.0.0.1:3260 2>&1 | tee /tmp/discovery.out
           grep -q "iqn.2024-01.io.iscsid-mac:test" /tmp/discovery.out
 
           # Log in to the target
