@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pdu.h"
+#include <syslog.h>
 
 /*
  * secure_zero: guaranteed-not-elided memory wipe.
@@ -92,19 +93,19 @@ int chap_parse_challenge(chap_ctx_t *ctx,
     /* Parse CHAP_A (algorithm must match) */
     uint32_t alg_num;
     if (pdu_kv_get_int(kv_buf, kv_len, "CHAP_A", &alg_num) != 0) {
-        fprintf(stderr, "auth: missing CHAP_A\n");
+        syslog(LOG_WARNING, "auth: missing CHAP_A");
         return -1;
     }
     if ((chap_alg_t)alg_num != ctx->algorithm) {
-        fprintf(stderr, "auth: algorithm mismatch (got %u, want %u)\n",
-                alg_num, (unsigned)ctx->algorithm);
+        syslog(LOG_WARNING, "auth: algorithm mismatch (got %u, want %u)",
+               alg_num, (unsigned)ctx->algorithm);
         return -1;
     }
 
     /* Parse CHAP_I (identifier) */
     uint32_t chap_i;
     if (pdu_kv_get_int(kv_buf, kv_len, "CHAP_I", &chap_i) != 0) {
-        fprintf(stderr, "auth: missing CHAP_I\n");
+        syslog(LOG_WARNING, "auth: missing CHAP_I");
         return -1;
     }
     ctx->identifier = (uint8_t)chap_i;
@@ -113,13 +114,13 @@ int chap_parse_challenge(chap_ctx_t *ctx,
     char chap_c_hex[CHAP_MAX_CHALLENGE_LEN * 2 + 4];
     if (pdu_kv_get_str(kv_buf, kv_len, "CHAP_C",
                        chap_c_hex, sizeof(chap_c_hex)) != 0) {
-        fprintf(stderr, "auth: missing CHAP_C\n");
+        syslog(LOG_WARNING, "auth: missing CHAP_C");
         return -1;
     }
 
     int n = chap_hex_decode(ctx->challenge, sizeof(ctx->challenge), chap_c_hex);
     if (n < 1) {
-        fprintf(stderr, "auth: invalid CHAP_C encoding\n");
+        syslog(LOG_WARNING, "auth: invalid CHAP_C encoding");
         return -1;
     }
     ctx->challenge_len = (size_t)n;

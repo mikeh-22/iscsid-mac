@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -82,6 +83,35 @@ static void test_crc32c_extend(void)
 /* -----------------------------------------------------------------------
  * PDU send/recv with both digests enabled
  * ----------------------------------------------------------------------- */
+
+/* -----------------------------------------------------------------------
+ * 3-way interleaved path: verify it matches chained scalar result
+ * ----------------------------------------------------------------------- */
+
+static void test_crc32c_large_buffer_3way(void)
+{
+    TEST("CRC32C: 3-way fast path matches scalar for 16 KiB buffer");
+
+    /* 16 384 bytes > CRC3_THRESHOLD (8192), so crc32c() uses the 3-way path */
+    enum { BUFSZ = 16384 };
+    uint8_t *buf = malloc(BUFSZ);
+    if (!buf) { FAIL("malloc"); return; }
+    for (int i = 0; i < BUFSZ; i++) buf[i] = (uint8_t)(i * 7 + 13);
+
+    /* One-shot via the 3-way interleaved path */
+    uint32_t oneshot = crc32c(buf, BUFSZ);
+
+    /* Same result built in 4096-byte pieces (< 8192 → scalar each time) */
+    uint32_t chained = crc32c(buf, 4096);
+    chained = crc32c_extend(chained, buf +  4096, 4096);
+    chained = crc32c_extend(chained, buf +  8192, 4096);
+    chained = crc32c_extend(chained, buf + 12288, 4096);
+
+    free(buf);
+
+    if (oneshot == chained) PASS();
+    else FAIL("3-way result differs from chained scalar result");
+}
 
 static void test_pdu_digest_roundtrip(void)
 {
@@ -215,6 +245,7 @@ int main(void)
     printf("=== CRC32C digest unit tests ===\n");
     test_crc32c_rfc_vectors();
     test_crc32c_extend();
+    test_crc32c_large_buffer_3way();
     test_pdu_digest_roundtrip();
     test_pdu_header_digest_only();
     test_pdu_digest_corruption_detected();

@@ -5,11 +5,13 @@
  */
 
 #include "config.h"
+#include "persist.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -20,6 +22,7 @@
 
 void config_defaults(iscsid_config_t *cfg)
 {
+    memset(cfg, 0, sizeof(*cfg));   /* zero all fields including target_configs */
     snprintf(cfg->initiator_name, sizeof(cfg->initiator_name),
              "iqn.2024-01.io.iscsid-mac:%s", "initiator");
     cfg->auth_method[0]        = '\0';
@@ -30,11 +33,19 @@ void config_defaults(iscsid_config_t *cfg)
     cfg->immediate_data        = ISCSI_DEFAULT_IMMEDIATE_DATA;
     cfg->error_recovery_level  = ISCSI_DEFAULT_ERROR_RECOVERY_LEVEL;
     cfg->max_connections       = ISCSI_DEFAULT_MAX_CONNECTIONS;
-    snprintf(cfg->pid_file,    sizeof(cfg->pid_file),
+    snprintf(cfg->pid_file,     sizeof(cfg->pid_file),
              "/var/run/iscsid.pid");
-    snprintf(cfg->socket_path, sizeof(cfg->socket_path),
+    snprintf(cfg->socket_path,  sizeof(cfg->socket_path),
              "/var/run/iscsid.sock");
+    snprintf(cfg->persist_path, sizeof(cfg->persist_path),
+             ISCSI_PERSIST_DEFAULT_PATH);
     cfg->log_debug = 0;
+
+    cfg->keepalive_timer_sec    = 30;
+    cfg->keepalive_idle_sec     = 25;
+    cfg->tcp_keepalive_idle     = 60;
+    cfg->tcp_keepalive_interval = 10;
+    cfg->tcp_keepalive_count    = 3;
 }
 
 /* -----------------------------------------------------------------------
@@ -61,12 +72,14 @@ int config_load(iscsid_config_t *cfg, const char *path)
     FILE *fp = fopen(p, "r");
     if (!fp) {
         if (errno == ENOENT) return 0;   /* no file is OK — use defaults */
-        fprintf(stderr, "config: cannot open %s: %s\n", p, strerror(errno));
+        syslog(LOG_ERR, "config: cannot open %s: %s", p, strerror(errno));
         return -1;
     }
 
     char line[1024];
-    int lineno = 0;
+    int  lineno = 0;
+    iscsi_target_config_t *cur_target = NULL;   /* NULL = global section */
+
     while (fgets(line, sizeof(line), fp)) {
         lineno++;
         char *l = trim(line);
@@ -74,10 +87,31 @@ int config_load(iscsid_config_t *cfg, const char *path)
         /* Skip comments and blank lines */
         if (*l == '#' || *l == '\0') continue;
 
+        /* Section header: [iqn.YYYY-MM.domain:name] */
+        if (*l == '[') {
+            char *end = strchr(l, ']');
+            if (!end) {
+                syslog(LOG_WARNING, "config:%d: unterminated '['", lineno);
+                continue;
+            }
+            *end = '\0';
+            const char *iqn = trim(l + 1);
+            cur_target = NULL;
+            if (cfg->num_target_configs < ISCSID_MAX_TARGET_CONFIGS) {
+                cur_target = &cfg->target_configs[cfg->num_target_configs++];
+                memset(cur_target, 0, sizeof(*cur_target));
+                snprintf(cur_target->target, sizeof(cur_target->target), "%s", iqn);
+            } else {
+                syslog(LOG_WARNING, "config: too many target sections (max %d)",
+                       ISCSID_MAX_TARGET_CONFIGS);
+            }
+            continue;
+        }
+
         /* Split on first '=' */
         char *eq = strchr(l, '=');
         if (!eq) {
-            fprintf(stderr, "config:%d: syntax error (no '=')\n", lineno);
+            syslog(LOG_WARNING, "config:%d: syntax error (no '=')", lineno);
             continue;
         }
         *eq = '\0';
@@ -85,41 +119,80 @@ int config_load(iscsid_config_t *cfg, const char *path)
         char *val = trim(eq + 1);
 
 #define MATCH(k)  (strcmp(key, (k)) == 0)
-#define STR(dst)  snprintf((dst), sizeof(dst), "%s", val)
+#define GSTR(dst) snprintf((dst), sizeof(dst), "%s", val)
+#define TSTR(dst) snprintf((dst), sizeof(dst), "%s", val)  /* cur_target non-null in this branch */
 
-        if      (MATCH("node.session.auth.username"))
-            STR(cfg->chap_username);
-        else if (MATCH("node.session.auth.password"))
-            STR(cfg->chap_secret);
-        else if (MATCH("node.session.auth.username_in"))
-            STR(cfg->chap_target_username);
-        else if (MATCH("node.session.auth.password_in"))
-            STR(cfg->chap_target_secret);
-        else if (MATCH("node.session.auth.authmethod"))
-            STR(cfg->auth_method);
-        else if (MATCH("node.session.iscsi.MaxBurstLength"))
-            cfg->max_burst_length = (uint32_t)atol(val);
-        else if (MATCH("node.session.iscsi.FirstBurstLength"))
-            cfg->first_burst_length = (uint32_t)atol(val);
-        else if (MATCH("node.session.iscsi.MaxRecvDataSegmentLength"))
-            cfg->max_recv_dsl = (uint32_t)atol(val);
-        else if (MATCH("node.session.iscsi.InitialR2T"))
-            cfg->initial_r2t = (strcmp(val, "Yes") == 0 || strcmp(val, "1") == 0);
-        else if (MATCH("node.session.iscsi.ImmediateData"))
-            cfg->immediate_data = (strcmp(val, "Yes") == 0 || strcmp(val, "1") == 0);
-        else if (MATCH("node.session.iscsi.ErrorRecoveryLevel"))
-            cfg->error_recovery_level = atoi(val);
-        else if (MATCH("node.session.iscsi.MaxConnections"))
-            cfg->max_connections = (uint32_t)atol(val);
-        else if (MATCH("iscsid.pid_file"))
-            STR(cfg->pid_file);
-        else if (MATCH("iscsid.socket_path"))
-            STR(cfg->socket_path);
-        else if (MATCH("iscsid.debug"))
-            cfg->log_debug = atoi(val);
+        if (cur_target) {
+            /* Per-target keys */
+            if      (MATCH("node.session.auth.username"))
+                TSTR(cur_target->chap_username);
+            else if (MATCH("node.session.auth.password"))
+                TSTR(cur_target->chap_secret);
+            else if (MATCH("node.session.auth.password_in"))
+                TSTR(cur_target->chap_target_secret);
+            else if (MATCH("node.session.auth.authmethod"))
+                TSTR(cur_target->auth_method);
+        } else {
+            /* Global keys */
+            if      (MATCH("node.session.auth.username"))
+                GSTR(cfg->chap_username);
+            else if (MATCH("node.session.auth.password"))
+                GSTR(cfg->chap_secret);
+            else if (MATCH("node.session.auth.username_in"))
+                GSTR(cfg->chap_target_username);
+            else if (MATCH("node.session.auth.password_in"))
+                GSTR(cfg->chap_target_secret);
+            else if (MATCH("node.session.auth.authmethod"))
+                GSTR(cfg->auth_method);
+            else if (MATCH("node.session.iscsi.MaxBurstLength"))
+                cfg->max_burst_length = (uint32_t)atol(val);
+            else if (MATCH("node.session.iscsi.FirstBurstLength"))
+                cfg->first_burst_length = (uint32_t)atol(val);
+            else if (MATCH("node.session.iscsi.MaxRecvDataSegmentLength"))
+                cfg->max_recv_dsl = (uint32_t)atol(val);
+            else if (MATCH("node.session.iscsi.InitialR2T"))
+                cfg->initial_r2t = (strcmp(val, "Yes") == 0 || strcmp(val, "1") == 0);
+            else if (MATCH("node.session.iscsi.ImmediateData"))
+                cfg->immediate_data = (strcmp(val, "Yes") == 0 || strcmp(val, "1") == 0);
+            else if (MATCH("node.session.iscsi.ErrorRecoveryLevel")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 0 && v <= 2) cfg->error_recovery_level = (int)v;
+            }
+            else if (MATCH("node.session.iscsi.MaxConnections"))
+                cfg->max_connections = (uint32_t)atol(val);
+            else if (MATCH("iscsid.pid_file"))
+                GSTR(cfg->pid_file);
+            else if (MATCH("iscsid.socket_path"))
+                GSTR(cfg->socket_path);
+            else if (MATCH("iscsid.debug")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val) cfg->log_debug = (v != 0);
+            }
+            else if (MATCH("iscsid.keepalive_timer")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 1 && v <= 3600) cfg->keepalive_timer_sec = (int)v;
+            }
+            else if (MATCH("iscsid.keepalive_idle")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 1 && v <= 3600) cfg->keepalive_idle_sec = (int)v;
+            }
+            else if (MATCH("iscsid.tcp_keepalive_idle")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 1 && v <= 7200) cfg->tcp_keepalive_idle = (int)v;
+            }
+            else if (MATCH("iscsid.tcp_keepalive_interval")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 1 && v <= 300) cfg->tcp_keepalive_interval = (int)v;
+            }
+            else if (MATCH("iscsid.tcp_keepalive_count")) {
+                char *end; long v = strtol(val, &end, 10);
+                if (end != val && v >= 1 && v <= 20) cfg->tcp_keepalive_count = (int)v;
+            }
+        }
 
 #undef MATCH
-#undef STR
+#undef GSTR
+#undef TSTR
     }
     fclose(fp);
     return 0;
@@ -201,6 +274,51 @@ void config_apply_session(const iscsid_config_t *cfg, iscsi_session_t *sess)
     sess->params.immediate_data       = cfg->immediate_data;
     sess->params.error_recovery_level = cfg->error_recovery_level;
     sess->params.max_connections      = cfg->max_connections;
+    sess->params.tcp_keepalive_idle     = cfg->tcp_keepalive_idle;
+    sess->params.tcp_keepalive_interval = cfg->tcp_keepalive_interval;
+    sess->params.tcp_keepalive_count    = cfg->tcp_keepalive_count;
+}
+
+/* -----------------------------------------------------------------------
+ * Per-target apply
+ * ----------------------------------------------------------------------- */
+
+void config_apply_session_target(const iscsid_config_t *cfg,
+                                  const char *target,
+                                  iscsi_session_t *sess)
+{
+    config_apply_session(cfg, sess);   /* global defaults first */
+
+    for (int i = 0; i < cfg->num_target_configs; i++) {
+        const iscsi_target_config_t *tc = &cfg->target_configs[i];
+        if (strcmp(tc->target, target) != 0) continue;
+
+        if (tc->auth_method[0]) {
+            if (strcmp(tc->auth_method, "None") == 0) {
+                /* Explicitly disable CHAP for this target */
+                sess->chap_secret[0]        = '\0';
+                sess->chap_username[0]      = '\0';
+                sess->chap_target_secret[0] = '\0';
+            } else if (strcmp(tc->auth_method, "CHAP") == 0 && tc->chap_secret[0]) {
+                /* Use per-target credentials */
+                snprintf(sess->chap_username, sizeof(sess->chap_username),
+                         "%s", tc->chap_username);
+                snprintf(sess->chap_secret, sizeof(sess->chap_secret),
+                         "%s", tc->chap_secret);
+                snprintf(sess->chap_target_secret, sizeof(sess->chap_target_secret),
+                         "%s", tc->chap_target_secret);
+            }
+        } else if (tc->chap_secret[0]) {
+            /* Credentials provided with no explicit authmethod: apply them */
+            snprintf(sess->chap_username, sizeof(sess->chap_username),
+                     "%s", tc->chap_username);
+            snprintf(sess->chap_secret, sizeof(sess->chap_secret),
+                     "%s", tc->chap_secret);
+            snprintf(sess->chap_target_secret, sizeof(sess->chap_target_secret),
+                     "%s", tc->chap_target_secret);
+        }
+        break;
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -222,4 +340,14 @@ void config_print(const iscsid_config_t *cfg)
     printf("  ErrorRecoveryLevel = %d\n", cfg->error_recovery_level);
     printf("  Socket             = %s\n", cfg->socket_path);
     printf("  PidFile            = %s\n", cfg->pid_file);
+    if (cfg->num_target_configs > 0) {
+        printf("  Per-target sections: %d\n", cfg->num_target_configs);
+        for (int i = 0; i < cfg->num_target_configs; i++) {
+            const iscsi_target_config_t *tc = &cfg->target_configs[i];
+            printf("    [%s] authmethod=%s username=%s\n",
+                   tc->target,
+                   tc->auth_method[0] ? tc->auth_method : "(inherit)",
+                   tc->chap_username[0] ? tc->chap_username : "(inherit)");
+        }
+    }
 }

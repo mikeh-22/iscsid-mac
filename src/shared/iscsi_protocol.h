@@ -435,6 +435,99 @@ static inline uint8_t iscsi_login_flags(int transit, int cont,
            (nsg & ISCSI_LOGIN_NSG_MASK);
 }
 
+/* Asynchronous Message PDU header overlay (RFC 7143 §10.9) */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;            /* 0x32 */
+    uint8_t  flags;             /* F */
+    uint8_t  rsvd2[2];
+    uint8_t  ahslength;
+    uint8_t  dlength[3];
+    uint8_t  lun[8];
+    uint32_t rsvd16;
+    uint32_t rsvd20;
+    uint32_t statsn;
+    uint32_t expcmdsn;
+    uint32_t maxcmdsn;
+    uint8_t  async_event;       /* byte 36: event code */
+    uint8_t  async_vcode;       /* byte 37: vendor-specific code */
+    uint16_t param1;            /* bytes 38-39: event-specific */
+    uint16_t param2;            /* bytes 40-41 */
+    uint16_t param3;            /* bytes 42-43 */
+    uint8_t  rsvd44[4];
+} iscsi_async_t;
+
+/* Async event codes (RFC 7143 §10.9.1) */
+#define ISCSI_ASYNC_SCSI_EVENT      0   /* SCSI async event (sense in data segment) */
+#define ISCSI_ASYNC_LOGOUT_REQUEST  1   /* target requests initiator logout */
+#define ISCSI_ASYNC_DROP_CONN       2   /* target will drop a connection */
+#define ISCSI_ASYNC_DROP_SESSION    3   /* target will drop the session */
+#define ISCSI_ASYNC_PARAM_NEG       4   /* target requests parameter renegotiation */
+
+/* SNACK Request PDU header overlay (RFC 7143 §10.16) */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;            /* 0x10 */
+    uint8_t  flags;             /* type[3:0] */
+    uint8_t  rsvd2[2];
+    uint8_t  ahslength;
+    uint8_t  dlength[3];        /* = 0 */
+    uint8_t  lun[8];
+    uint32_t itt;               /* ITT or 0xFFFFFFFF */
+    uint32_t ttt;               /* TTT or SNACK Tag */
+    uint32_t rsvd24;
+    uint32_t expstatsn;
+    uint32_t rsvd32;
+    uint32_t expdatasn;
+    uint32_t begrun;
+    uint32_t runlength;
+} iscsi_snack_req_t;
+
+/* SNACK types (flags[3:0]) */
+#define ISCSI_SNACK_DATA_ACK        0
+#define ISCSI_SNACK_R2T_SNACK       1
+#define ISCSI_SNACK_DATA_SNACK      2
+#define ISCSI_SNACK_STATUS_SNACK    3
+
+/* Task Management Function Request PDU header overlay (RFC 7143 §10.5) */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;            /* 0x02 | ISCSI_OP_IMMEDIATE */
+    uint8_t  flags;             /* F | function[6:0] */
+    uint8_t  rsvd2[2];
+    uint8_t  ahslength;
+    uint8_t  dlength[3];        /* = 0 */
+    uint8_t  lun[8];
+    uint32_t itt;
+    uint32_t rtt;               /* Referenced Task Tag */
+    uint32_t cmdsn;
+    uint32_t expstatsn;
+    uint32_t refcmdsn;
+    uint32_t expdatasn;
+    uint8_t  rsvd40[8];
+} iscsi_task_mgmt_req_t;
+
+/* Task Management Function Response PDU header overlay (RFC 7143 §10.6) */
+typedef struct __attribute__((packed)) {
+    uint8_t  opcode;            /* 0x22 */
+    uint8_t  flags;             /* F */
+    uint8_t  response;
+    uint8_t  rsvd3;
+    uint8_t  ahslength;
+    uint8_t  dlength[3];
+    uint8_t  rsvd8[8];
+    uint32_t itt;
+    uint32_t rsvd20;
+    uint32_t statsn;
+    uint32_t expcmdsn;
+    uint32_t maxcmdsn;
+    uint8_t  rsvd36[12];
+} iscsi_task_mgmt_rsp_t;
+
+/* Task Management Function codes (flags[6:0]) */
+#define ISCSI_TM_FUNC_ABORT_TASK        1
+#define ISCSI_TM_FUNC_ABORT_TASK_SET    2
+#define ISCSI_TM_FUNC_LUN_RESET         5
+#define ISCSI_TM_FUNC_TARGET_WARM_RESET 6
+#define ISCSI_TM_FUNC_TASK_REASSIGN     8
+
 /* Static assertion that PDU overlay structs are exactly 48 bytes */
 _Static_assert(sizeof(iscsi_hdr_t)         == ISCSI_HDR_LEN, "iscsi_hdr_t size");
 _Static_assert(sizeof(iscsi_login_req_t)   == ISCSI_HDR_LEN, "iscsi_login_req_t size");
@@ -451,3 +544,7 @@ _Static_assert(sizeof(iscsi_logout_rsp_t)  == ISCSI_HDR_LEN, "iscsi_logout_rsp_t
 _Static_assert(sizeof(iscsi_nop_out_t)     == ISCSI_HDR_LEN, "iscsi_nop_out_t size");
 _Static_assert(sizeof(iscsi_nop_in_t)      == ISCSI_HDR_LEN, "iscsi_nop_in_t size");
 _Static_assert(sizeof(iscsi_reject_t)      == ISCSI_HDR_LEN, "iscsi_reject_t size");
+_Static_assert(sizeof(iscsi_async_t)       == ISCSI_HDR_LEN, "iscsi_async_t size");
+_Static_assert(sizeof(iscsi_snack_req_t)   == ISCSI_HDR_LEN, "iscsi_snack_req_t size");
+_Static_assert(sizeof(iscsi_task_mgmt_req_t) == ISCSI_HDR_LEN, "iscsi_task_mgmt_req_t size");
+_Static_assert(sizeof(iscsi_task_mgmt_rsp_t) == ISCSI_HDR_LEN, "iscsi_task_mgmt_rsp_t size");

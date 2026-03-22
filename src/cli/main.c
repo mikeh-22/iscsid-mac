@@ -32,15 +32,20 @@ static void usage(const char *prog)
     fprintf(stderr,
         "Usage: %s <command> [options]\n\n"
         "Commands:\n"
-        "  discover  -h <host> [-p <port>]          Discover iSCSI targets\n"
-        "  login     -h <host> [-p <port>] -t <iqn> Login to a target\n"
-        "  logout    -t <iqn>                        Logout from a target\n"
-        "  list                                      List active sessions\n"
-        "  status                                    Show daemon status\n"
-        "  ping                                      Ping the daemon\n\n"
+        "  discover       -h <host> [-p <port>]           Discover iSCSI targets (SendTargets)\n"
+        "  isns-discover  -h <host> [-p <port>]           Discover targets via iSNS server\n"
+        "  login          -h <host> [-p <port>] -t <iqn>  Login to a target\n"
+        "  logout         -t <iqn>                         Logout from a target\n"
+        "  add-connection -t <iqn> -h <host> [-p <port>]  Add a connection to a session\n"
+        "  luns           -t <iqn>                         List LUNs on a logged-in target\n"
+        "  nbd-serve      -t <iqn> [-l <lun>]             Serve a LUN as an NBD block device\n"
+        "  list                                            List active sessions\n"
+        "  status                                          Show daemon status\n"
+        "  ping                                            Ping the daemon\n\n"
         "Options:\n"
         "  -h <host>   Target host (IP or hostname)\n"
-        "  -p <port>   Target port (default: 3260)\n"
+        "  -l <lun>    LUN number for nbd-serve (default: 0)\n"
+        "  -p <port>   Target port (default: 3260; iSNS default: 3205)\n"
         "  -t <iqn>    Target IQN\n"
         "  -s <path>   Daemon socket path (default: %s)\n\n",
         prog, SOCK_PATH);
@@ -137,6 +142,27 @@ static int send_command(const char *sock_path, const char *json)
                 }
             }
         }
+    } else if (strstr(resp, "\"luns\":[")) {
+        const char *p = strstr(resp, "\"count\":");
+        if (p) {
+            int count = atoi(p + 8);
+            printf("%d LUN(s):\n", count);
+        }
+        p = strstr(resp, "\"luns\":[");
+        if (p) {
+            p += 8;
+            int idx = 0;
+            while (*p && *p != ']') {
+                if (*p >= '0' && *p <= '9') {
+                    printf("  LUN %d\n", atoi(p));
+                    while (*p && *p != ',' && *p != ']') p++;
+                    idx++;
+                } else {
+                    p++;
+                }
+            }
+            if (idx == 0) printf("  (no LUNs)\n");
+        }
     } else if (strstr(resp, "\"targets\":[")) {
         /* Discovery results */
         const char *p = strstr(resp, "\"count\":");
@@ -185,6 +211,17 @@ static int send_command(const char *sock_path, const char *json)
                 }
             }
         }
+    } else if (strstr(resp, "\"port\":")) {
+        /* nbd-serve response */
+        const char *p = strstr(resp, "\"port\":");
+        if (p) {
+            int port = atoi(p + 7);
+            printf("NBD server listening on 127.0.0.1:%d\n\n", port);
+            printf("Connect with:\n");
+            printf("  Linux:  sudo nbd-client 127.0.0.1 %d /dev/nbd0\n", port);
+            printf("  macOS:  nbdfuse <mountpoint> -- nbd://127.0.0.1:%d\n\n", port);
+            printf("The server runs until the NBD client disconnects.\n");
+        }
     } else {
         /* Generic: extract and show "msg" if present */
         const char *p = strstr(resp, "\"msg\":\"");
@@ -219,6 +256,7 @@ int main(int argc, char *argv[])
     const char *host      = NULL;
     const char *port_str  = "3260";
     const char *target    = NULL;
+    const char *lun_str   = "0";
     const char *sock_path = SOCK_PATH;
     const char *cmd       = NULL;
 
@@ -239,6 +277,7 @@ int main(int argc, char *argv[])
             if (!val) { fprintf(stderr, "iscsictl: -%c requires an argument\n", flag); return 1; }
             switch (flag) {
             case 'h': host      = val; break;
+            case 'l': lun_str   = val; break;
             case 'p': port_str  = val; break;
             case 't': target    = val; break;
             case 's': sock_path = val; break;
@@ -269,6 +308,29 @@ int main(int argc, char *argv[])
                  host, port_str);
         return send_command(sock_path, json);
 
+    } else if (strcmp(cmd, "isns-discover") == 0) {
+        if (!host) {
+            fprintf(stderr, "iscsictl: -h <host> required for isns-discover\n");
+            return 1;
+        }
+        /* Default iSNS port is 3205 if the user didn't override -p */
+        const char *isns_port = (strcmp(port_str, "3260") == 0) ? "3205" : port_str;
+        snprintf(json, sizeof(json),
+                 "{\"cmd\":\"isns-discover\",\"host\":\"%s\",\"port\":\"%s\"}",
+                 host, isns_port);
+        return send_command(sock_path, json);
+
+    } else if (strcmp(cmd, "add-connection") == 0) {
+        if (!target || !host) {
+            fprintf(stderr, "iscsictl: -t <target> and -h <host> required for add-connection\n");
+            return 1;
+        }
+        snprintf(json, sizeof(json),
+                 "{\"cmd\":\"add-connection\",\"target\":\"%s\","
+                 "\"host\":\"%s\",\"port\":\"%s\"}",
+                 target, host, port_str);
+        return send_command(sock_path, json);
+
     } else if (strcmp(cmd, "login") == 0) {
         if (!host || !target) {
             fprintf(stderr, "iscsictl: -h <host> and -t <target> required\n");
@@ -287,6 +349,25 @@ int main(int argc, char *argv[])
         }
         snprintf(json, sizeof(json),
                  "{\"cmd\":\"logout\",\"target\":\"%s\"}", target);
+        return send_command(sock_path, json);
+
+    } else if (strcmp(cmd, "luns") == 0) {
+        if (!target) {
+            fprintf(stderr, "iscsictl: -t <target> required for luns\n");
+            return 1;
+        }
+        snprintf(json, sizeof(json),
+                 "{\"cmd\":\"luns\",\"target\":\"%s\"}", target);
+        return send_command(sock_path, json);
+
+    } else if (strcmp(cmd, "nbd-serve") == 0) {
+        if (!target) {
+            fprintf(stderr, "iscsictl: -t <target> required for nbd-serve\n");
+            return 1;
+        }
+        snprintf(json, sizeof(json),
+                 "{\"cmd\":\"nbd-serve\",\"target\":\"%s\",\"lun\":\"%s\"}",
+                 target, lun_str);
         return send_command(sock_path, json);
 
     } else if (strcmp(cmd, "list") == 0) {

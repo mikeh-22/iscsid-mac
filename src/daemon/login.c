@@ -19,6 +19,7 @@
 
 #include "login.h"
 #include "auth.h"
+#include "connection.h"
 #include "pdu.h"
 #include "../shared/iscsi_protocol.h"
 
@@ -27,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -76,25 +78,52 @@ static int recv_login(iscsi_conn_t *conn, iscsi_session_t *sess,
 
     iscsi_login_rsp_t *rsp = (iscsi_login_rsp_t *)&pdu_out->hdr;
     if ((rsp->opcode & 0x3f) != ISCSI_OP_LOGIN_RSP) {
-        fprintf(stderr, "login: expected login response opcode, got 0x%02x\n",
-                rsp->opcode & 0x3f);
+        syslog(LOG_ERR, "login: expected login response opcode, got 0x%02x",
+               rsp->opcode & 0x3f);
         pdu_free_data(pdu_out);
         return LOGIN_PROTO_ERROR;
     }
 
     if (rsp->status_class != 0) {
-        fprintf(stderr, "login: failed status 0x%02x%02x (class=%u detail=%u)\n",
-                rsp->status_class, rsp->status_detail,
-                rsp->status_class, rsp->status_detail);
+        if (rsp->status_class == 0x01) {
+            /*
+             * Login redirect (RFC 7143 §10.13.5, status class 0x01).
+             * Extract TargetAddress="host:port[,groupTag]", strip the
+             * optional group tag, and store in sess->redirect_addr so the
+             * caller can reconnect and retry.
+             */
+            if (pdu_out->data_len > 0) {
+                const char *ta = pdu_kv_get((char *)pdu_out->data,
+                                             pdu_out->data_len, "TargetAddress");
+                if (ta) {
+                    snprintf(sess->redirect_addr, sizeof(sess->redirect_addr),
+                             "%s", ta);
+                    /* Strip ",groupTag" suffix */
+                    char *comma = strrchr(sess->redirect_addr, ',');
+                    if (comma) *comma = '\0';
+                }
+            }
+            syslog(LOG_NOTICE, "login: redirect to %s", sess->redirect_addr);
+            pdu_free_data(pdu_out);
+            return LOGIN_REDIRECTED;
+        }
+        syslog(LOG_WARNING, "login: failed status 0x%02x%02x (class=%u detail=%u)",
+               rsp->status_class, rsp->status_detail,
+               rsp->status_class, rsp->status_detail);
         pdu_free_data(pdu_out);
         switch (rsp->status_class) {
-        case 0x01: return LOGIN_TARGET_ERROR;   /* redirect */
         case 0x02: return LOGIN_AUTH_FAILED;
         case 0x03: return LOGIN_NO_RESOURCES;
         default:   return LOGIN_TARGET_ERROR;
         }
     }
 
+    /*
+     * sess->tsih is written here without sess->lock.  This is safe because
+     * login is always called from a single IPC worker thread before the
+     * session is registered in g_sessions (and thus before the kqueue thread
+     * can observe it).  No concurrent access is possible at this point.
+     */
     if (sess->tsih == 0 && rsp->tsih != 0)
         sess->tsih = ntohs(rsp->tsih);
 
@@ -170,8 +199,7 @@ static int login_auth_chap(iscsi_session_t *sess, iscsi_conn_t *conn)
     int  used, rc;
 
     chap_ctx_t chap;
-    chap_init(&chap, CHAP_ALG_MD5, sess->chap_secret,
-              sess->chap_target_secret[0] ? sess->chap_target_secret : NULL);
+    memset(&chap, 0, sizeof(chap));   /* initialized after algorithm is negotiated */
 
     /* Round 1: propose CHAP, get target's algorithm selection */
     used = 0;
@@ -191,9 +219,9 @@ static int login_auth_chap(iscsi_session_t *sess, iscsi_conn_t *conn)
     if (rc) return rc;
     pdu_free_data(&rsp1);
 
-    /* Round 2: propose MD5 algorithm */
+    /* Round 2: offer SHA-256 (preferred) and MD5 (mandatory fallback) per RFC 7143 */
     used = 0;
-    used = pdu_kv_append(kv, sizeof(kv), used, "CHAP_A", "5");  /* MD5 */
+    used = pdu_kv_append(kv, sizeof(kv), used, "CHAP_A", "7,5");
     rc = send_login(conn, sess, ISCSI_SECURITY_NEGOTIATION,
                     ISCSI_SECURITY_NEGOTIATION, 0, kv, (uint32_t)used);
     if (rc) return LOGIN_IO_ERROR;
@@ -202,7 +230,25 @@ static int login_auth_chap(iscsi_session_t *sess, iscsi_conn_t *conn)
     rc = recv_login(conn, sess, &rsp2);
     if (rc) return rc;
 
-    /* Parse target's CHAP challenge */
+    /* Determine which algorithm the target selected and initialise context */
+    uint32_t selected_alg = (uint32_t)CHAP_ALG_MD5;   /* default if not echoed */
+    pdu_kv_get_int((char *)rsp2.data, rsp2.data_len, "CHAP_A", &selected_alg);
+
+    chap_alg_t alg;
+    if (selected_alg == (uint32_t)CHAP_ALG_SHA256) {
+        alg = CHAP_ALG_SHA256;
+    } else if (selected_alg == (uint32_t)CHAP_ALG_MD5) {
+        alg = CHAP_ALG_MD5;
+    } else {
+        syslog(LOG_WARNING, "login: target selected unknown CHAP algorithm %u",
+               selected_alg);
+        pdu_free_data(&rsp2);
+        return LOGIN_AUTH_FAILED;
+    }
+    chap_init(&chap, alg, sess->chap_secret,
+              sess->chap_target_secret[0] ? sess->chap_target_secret : NULL);
+
+    /* Parse target's CHAP challenge (context now has the correct algorithm) */
     rc = chap_parse_challenge(&chap, (char *)rsp2.data, rsp2.data_len);
     pdu_free_data(&rsp2);
     if (rc) return LOGIN_AUTH_FAILED;
@@ -242,7 +288,7 @@ static int login_auth_chap(iscsi_session_t *sess, iscsi_conn_t *conn)
         uint32_t tid = 0;
         pdu_kv_get_int((char *)rsp3.data, rsp3.data_len, "CHAP_I", &tid);
         if (!tr || chap_verify_mutual(&chap, (uint8_t)tid, tr) != 0) {
-            fprintf(stderr, "login: mutual CHAP verification failed\n");
+            syslog(LOG_WARNING, "login: mutual CHAP verification failed");
             pdu_free_data(&rsp3);
             return LOGIN_AUTH_FAILED;
         }
@@ -297,7 +343,9 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
     used = pdu_kv_append(kv, sizeof(kv), used, "DataDigest",   "CRC32C,None");
 
     if (sess->type == SESS_TYPE_NORMAL) {
-        snprintf(tmp, sizeof(tmp), "%u", sess->params.max_connections);
+        /* Offer our maximum; the negotiated minimum wins.
+         * This enables MCS when the target supports it. */
+        snprintf(tmp, sizeof(tmp), "%u", ISCSI_MAX_CONNS_PER_SESSION);
         used = pdu_kv_append(kv, sizeof(kv), used, "MaxConnections", tmp);
     }
 
@@ -321,8 +369,8 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
         if (pdu_kv_get_int((char *)rsp.data, rsp.data_len,
                            "MaxRecvDataSegmentLength", &ival) == 0) {
             if (ival < 512 || ival > ISCSI_MAX_RECV_SEG_LEN) {
-                fprintf(stderr, "login: target MaxRecvDataSegmentLength %u "
-                        "out of range [512, %u]\n", ival, ISCSI_MAX_RECV_SEG_LEN);
+                syslog(LOG_WARNING, "login: target MaxRecvDataSegmentLength %u "
+                       "out of range [512, %u]", ival, ISCSI_MAX_RECV_SEG_LEN);
                 pdu_free_data(&rsp);
                 return LOGIN_PROTO_ERROR;
             }
@@ -332,8 +380,8 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
         if (pdu_kv_get_int((char *)rsp.data, rsp.data_len,
                            "MaxBurstLength", &ival) == 0) {
             if (ival < 512 || ival > ISCSI_MAX_RECV_SEG_LEN) {
-                fprintf(stderr, "login: target MaxBurstLength %u "
-                        "out of range\n", ival);
+                syslog(LOG_WARNING, "login: target MaxBurstLength %u "
+                       "out of range", ival);
                 pdu_free_data(&rsp);
                 return LOGIN_PROTO_ERROR;
             }
@@ -343,12 +391,19 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
         if (pdu_kv_get_int((char *)rsp.data, rsp.data_len,
                            "FirstBurstLength", &ival) == 0) {
             if (ival < 512 || ival > sess->params.max_burst_length) {
-                fprintf(stderr, "login: target FirstBurstLength %u "
-                        "out of range\n", ival);
+                syslog(LOG_WARNING, "login: target FirstBurstLength %u "
+                       "out of range", ival);
                 pdu_free_data(&rsp);
                 return LOGIN_PROTO_ERROR;
             }
             sess->params.first_burst_length = ival;
+        }
+
+        uint32_t ival2;
+        if (pdu_kv_get_int((char *)rsp.data, rsp.data_len,
+                           "MaxConnections", &ival2) == 0) {
+            if (ival2 >= 1 && ival2 <= ISCSI_MAX_CONNS_PER_SESSION)
+                sess->params.max_connections = ival2;
         }
 
         const char *v;
@@ -381,7 +436,9 @@ static int login_operational(iscsi_session_t *sess, iscsi_conn_t *conn)
 login_result_t iscsi_login(iscsi_session_t *sess, iscsi_conn_t *conn)
 {
     int rc;
+    int redirects = 0;
 
+retry:
     conn->state = CONN_STATE_IN_LOGIN;
 
     /* Security phase */
@@ -390,6 +447,34 @@ login_result_t iscsi_login(iscsi_session_t *sess, iscsi_conn_t *conn)
     } else {
         rc = login_auth_none(sess, conn);
     }
+
+    if (rc == LOGIN_REDIRECTED) {
+        if (redirects >= ISCSI_LOGIN_MAX_REDIRECTS) {
+            syslog(LOG_WARNING, "login: too many redirects (%d), giving up",
+                   ISCSI_LOGIN_MAX_REDIRECTS);
+            conn->state = CONN_STATE_FAILED;
+            return LOGIN_TARGET_ERROR;
+        }
+        char rhost[256];
+        uint16_t rport;
+        if (iscsi_parse_portal(sess->redirect_addr, rhost, sizeof(rhost), &rport) != 0) {
+            syslog(LOG_ERR, "login: cannot parse redirect address '%s'",
+                   sess->redirect_addr);
+            conn->state = CONN_STATE_FAILED;
+            return LOGIN_TARGET_ERROR;
+        }
+        if (conn_reconnect(conn, rhost, rport) != 0) {
+            return LOGIN_TARGET_ERROR;   /* conn->state already set to FAILED */
+        }
+        /* New session on the redirected target — reset TSIH and all SN state */
+        sess->tsih       = 0;
+        sess->cmd_sn     = 1;
+        sess->exp_cmd_sn = 0;
+        sess->max_cmd_sn = 0;
+        redirects++;
+        goto retry;
+    }
+
     if (rc) {
         conn->state = CONN_STATE_FAILED;
         return (login_result_t)rc;
@@ -402,6 +487,7 @@ login_result_t iscsi_login(iscsi_session_t *sess, iscsi_conn_t *conn)
         return (login_result_t)rc;
     }
 
+    /* sess->state written without sess->lock: see recv_login() comment above */
     conn->state = CONN_STATE_LOGGED_IN;
     sess->state = SESS_STATE_LOGGED_IN;
 
@@ -435,19 +521,66 @@ int iscsi_logout(iscsi_session_t *sess, iscsi_conn_t *conn, uint8_t reason)
     if (rc) return rc;
 
     if ((rsp.hdr.opcode & 0x3f) != ISCSI_OP_LOGOUT_RSP) {
-        fprintf(stderr, "logout: unexpected opcode 0x%02x\n",
-                rsp.hdr.opcode & 0x3f);
+        syslog(LOG_WARNING, "logout: unexpected opcode 0x%02x",
+               rsp.hdr.opcode & 0x3f);
         pdu_free_data(&rsp);
         return -1;
     }
 
     iscsi_logout_rsp_t *lr = (iscsi_logout_rsp_t *)&rsp.hdr;
     if (lr->response != 0)
-        fprintf(stderr, "logout: target returned response code %u\n", lr->response);
+        syslog(LOG_WARNING, "logout: target returned response code %u", lr->response);
 
     pdu_free_data(&rsp);
     conn->state = CONN_STATE_FREE;
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Add-connection login (MCS / ERL-1 reinstatement)
+ * ----------------------------------------------------------------------- */
+
+login_result_t iscsi_login_add_conn(iscsi_session_t *sess, iscsi_conn_t *conn)
+{
+    /*
+     * Adding a connection to an existing session follows the same Login FSM
+     * as initial login, with one critical difference: sess->tsih is non-zero.
+     * The target uses (ISID, TSIH) to match the incoming login to the existing
+     * session and assigns the new connection to it instead of creating a new
+     * session.  See RFC 7143 §6.3.6.
+     */
+    int rc;
+
+    if (sess->tsih == 0) {
+        syslog(LOG_ERR, "login_add_conn: session has no TSIH");
+        return LOGIN_PROTO_ERROR;
+    }
+
+    conn->state = CONN_STATE_IN_LOGIN;
+
+    /* Security phase: use same credentials as the original login */
+    if (sess->chap_secret[0]) {
+        rc = login_auth_chap(sess, conn);
+    } else {
+        rc = login_auth_none(sess, conn);
+    }
+    if (rc) {
+        conn->state = CONN_STATE_FAILED;
+        return (login_result_t)rc;
+    }
+
+    /* Operational negotiation — only connection-scoped params need renegotiation */
+    rc = login_operational(sess, conn);
+    if (rc) {
+        conn->state = CONN_STATE_FAILED;
+        return (login_result_t)rc;
+    }
+
+    conn->state = CONN_STATE_LOGGED_IN;
+
+    printf("login: added connection CID %u to session '%s'\n",
+           conn->cid, sess->target_name);
+    return LOGIN_OK;
 }
 
 const char *login_result_str(login_result_t r)
@@ -459,6 +592,7 @@ const char *login_result_str(login_result_t r)
     case LOGIN_PROTO_ERROR:  return "Protocol error";
     case LOGIN_TARGET_ERROR: return "Target error";
     case LOGIN_NO_RESOURCES: return "No resources";
+    case LOGIN_REDIRECTED:   return "Redirected";
     default:                 return "Unknown error";
     }
 }

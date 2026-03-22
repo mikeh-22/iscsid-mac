@@ -29,8 +29,8 @@
     <key>StandardErrorPath</key>
     <string>/var/log/iscsid.log</string>
 
-    <!-- Require network before starting -->
-    <key>NetworkState</key>
-    <true/>
+    <!-- Restart automatically if the daemon crashes -->
+    <key>ProcessType</key>
+    <string>Background</string>
 </dict>
 </plist>

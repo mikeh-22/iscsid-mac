@@ -10,9 +10,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <time.h>
 #include <netinet/in.h>
 
-#define ISCSI_CONN_RECV_BUFSIZE  (256 * 1024)
+#define ISCSI_CONN_RECV_BUFSIZE       (256 * 1024)
+#define ISCSI_CONN_RECV_TIMEOUT_SEC   30    /* SO_RCVTIMEO for pdu_recv / scsi_exec */
+#define ISCSI_KEEPALIVE_IDLE_SEC      25    /* send NOP-Out if conn silent this long */
 
 typedef enum {
     CONN_STATE_FREE = 0,
@@ -42,6 +45,9 @@ typedef struct iscsi_conn {
     /* Back-pointer */
     iscsi_session_t *session;
 
+    /* Keepalive: timestamp of last successful PDU send or receive */
+    time_t          last_activity;
+
     /* Linked list (within session) */
     struct iscsi_conn *next;
 } iscsi_conn_t;
@@ -69,6 +75,33 @@ int conn_set_keepalive(iscsi_conn_t *conn, int idle_sec,
 int conn_set_nodelay(iscsi_conn_t *conn);
 
 /*
+ * Close conn->fd and reconnect to a new host:port, preserving the conn struct.
+ * Applies the same socket options as conn_create().  Resets connection-scoped
+ * state (exp_statsn, digest settings) so the login FSM can restart cleanly.
+ *
+ * Returns 0 on success, -1 on failure (conn->state set to CONN_STATE_FAILED).
+ */
+int conn_reconnect(iscsi_conn_t *conn, const char *host, uint16_t port);
+
+/*
  * Get a human-readable description of connection state.
  */
 const char *conn_state_str(conn_state_t state);
+
+/*
+ * Parse a portal address string into host and port components.
+ *
+ * Handles:
+ *   IPv4 / hostname:  "host:port"  or  "host"  (default port)
+ *   IPv6 bracketed:   "[::1]:port" or  "[::1]" (default port)
+ *   Group tag suffix: "host:port,groupTag" → stripped before parsing
+ *
+ * host is written as a NUL-terminated string into host_out[0..host_size-1].
+ * *port_out receives the parsed port, or ISCSI_PORT if none is present.
+ *
+ * Returns 0 on success, -1 if the address format is unrecognisable or the
+ * port is out of range [1, 65535].
+ */
+int iscsi_parse_portal(const char *addr,
+                       char *host_out, size_t host_size,
+                       uint16_t *port_out);

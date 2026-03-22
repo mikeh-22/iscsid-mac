@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <syslog.h>
 #include <unistd.h>
 
 /* -----------------------------------------------------------------------
@@ -65,7 +66,7 @@ int ipc_server_create(const char *path)
 
     unlink(path);   /* remove stale socket */
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "ipc: bind %s: %s\n", path, strerror(errno));
+        syslog(LOG_ERR, "ipc: bind %s: %s", path, strerror(errno));
         close(fd);
         return -1;
     }
@@ -73,14 +74,14 @@ int ipc_server_create(const char *path)
     /* Restrict socket access to the daemon's owner only.
      * This prevents unprivileged users from issuing login/logout commands. */
     if (chmod(path, 0600) < 0) {
-        fprintf(stderr, "ipc: chmod %s: %s\n", path, strerror(errno));
+        syslog(LOG_ERR, "ipc: chmod %s: %s", path, strerror(errno));
         unlink(path);
         close(fd);
         return -1;
     }
 
     if (listen(fd, 8) < 0) {
-        fprintf(stderr, "ipc: listen: %s\n", strerror(errno));
+        syslog(LOG_ERR, "ipc: listen: %s", strerror(errno));
         close(fd);
         return -1;
     }
@@ -141,7 +142,7 @@ int ipc_recv(int fd, char *buf, size_t buf_size)
 
     uint32_t len = ntohl(nlen);
     if (len >= buf_size) {
-        fprintf(stderr, "ipc: message too large (%u bytes)\n", len);
+        syslog(LOG_WARNING, "ipc: message too large (%u bytes)", len);
         return -EMSGSIZE;
     }
 
