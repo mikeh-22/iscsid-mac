@@ -44,6 +44,11 @@ typedef struct {
     uint32_t    default_time2retain;    /* DefaultTime2Retain */
     uint32_t    max_recv_dsl;           /* MaxRecvDataSegmentLength */
     int         error_recovery_level;   /* ErrorRecoveryLevel */
+
+    /* TCP keepalive parameters (applied to every connection in this session) */
+    int         tcp_keepalive_idle;     /* TCP_KEEPALIVE idle time (seconds) */
+    int         tcp_keepalive_interval; /* TCP_KEEPINTVL (seconds) */
+    int         tcp_keepalive_count;    /* TCP_KEEPCNT */
 } iscsi_op_params_t;
 
 struct iscsi_session {
@@ -76,8 +81,40 @@ struct iscsi_session {
     char            chap_secret[CHAP_MAX_SECRET_LEN];
     char            chap_target_secret[CHAP_MAX_SECRET_LEN];
 
+    /* Login redirect: set by recv_login() on status_class==0x01 */
+    char            redirect_addr[300];   /* "host:port" (group tag stripped) */
+
+    /* ITT and CID allocators */
+    uint32_t        next_itt;           /* wraps at 0xFFFFFFFE, never 0xFFFFFFFF */
+    uint16_t        next_cid;           /* starts at 1, increments per connection */
+
     /* Thread safety */
     pthread_mutex_t lock;
+
+    /* Protected by g_sessions_lock in main.c.
+     *
+     * recovery_in_progress: non-zero while an ERL-1 recovery thread is active.
+     *   Prevents spawning duplicate recovery attempts on rapid failure events.
+     *
+     * busy_count: incremented by IPC handlers (luns, add_conn) before they
+     *   drop g_sessions_lock to perform blocking network I/O that references
+     *   this session.  Decremented (and recovery_done broadcast) when done.
+     *
+     * The logout handler waits (with a 5 s timeout) for both to reach zero
+     * before calling session_destroy(), preventing use-after-free. */
+    volatile int    recovery_in_progress;
+    uint32_t        busy_count;
+    pthread_cond_t  recovery_done;
+
+    /*
+     * scsi_recovery_cond: broadcast under sess->lock when recovery_in_progress
+     * transitions to 0.  Used by session_wait_recovery() so that scsi_exec()
+     * can block until ERL-1 reconnect finishes, then retry the command on the
+     * new connection.  (recovery_done above is broadcast under g_sessions_lock
+     * and is used by the logout handler in main.c; these are separate conds to
+     * keep the locking domains independent.)
+     */
+    pthread_cond_t  scsi_recovery_cond;
 
     /* Linked list */
     struct iscsi_session *next;
@@ -127,6 +164,31 @@ void session_update_sn(iscsi_session_t *sess,
 
 /* Set the ISID bytes (generates a random ISID if isid == NULL). */
 void session_set_isid(iscsi_session_t *sess, const uint8_t isid[6]);
+
+/* Allocate a unique ITT for a new command (never issues 0xFFFFFFFF). */
+uint32_t session_next_itt(iscsi_session_t *sess);
+
+/* Allocate the next connection ID (starts at 1, wraps at 65534). */
+uint16_t session_next_cid(iscsi_session_t *sess);
+
+/*
+ * Wait for an in-progress ERL-1 recovery to complete.
+ *
+ * Blocks (releasing no external locks) until recovery_in_progress clears or
+ * timeout_sec elapses.  Must NOT be called with sess->lock or g_sessions_lock
+ * held.
+ *
+ * Returns 0 if the session is back in LOGGED_IN state, -1 otherwise
+ * (timeout or recovery failed).
+ */
+int session_wait_recovery(iscsi_session_t *sess, unsigned timeout_sec);
+
+/*
+ * Broadcast scsi_recovery_cond to wake any session_wait_recovery() callers.
+ * Called by main.c's recovery_thread after clearing recovery_in_progress.
+ * Must NOT be called with sess->lock held.
+ */
+void session_signal_recovery(iscsi_session_t *sess);
 
 /* String representations */
 const char *sess_state_str(sess_state_t state);

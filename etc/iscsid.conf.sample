@@ -28,3 +28,21 @@
 # iscsid.pid_file = /var/run/iscsid.pid
 # iscsid.socket_path = /var/run/iscsid.sock
 # iscsid.debug = 0
+
+# ---- Per-target overrides ----
+# Any key inside a [iqn...] section overrides the global setting for that
+# specific target only.  Supported per-target keys:
+#   node.session.auth.authmethod   (None | CHAP)
+#   node.session.auth.username
+#   node.session.auth.password
+#   node.session.auth.password_in
+#
+# Example: one target uses CHAP, another is unauthenticated:
+#
+# [iqn.2024-01.io.storage:encrypted-volume]
+# node.session.auth.authmethod = CHAP
+# node.session.auth.username   = initiator-user
+# node.session.auth.password   = at-least-12-bytes
+#
+# [iqn.2024-01.io.storage:public-volume]
+# node.session.auth.authmethod = None

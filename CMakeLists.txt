@@ -49,7 +49,8 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-g -O0 -fsanitize=address,undefined)
     add_link_options(-fsanitize=address,undefined)
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compile_options(-O2 -DNDEBUG)
+    add_compile_options(-O2 -DNDEBUG -fPIE)
+    add_link_options(-pie)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,13 @@ set(LIB_SOURCES
     src/daemon/discovery.c
     src/daemon/config.c
     src/daemon/ipc.c
+    src/daemon/async.c
+    src/daemon/recovery.c
+    src/daemon/isns.c
+    src/daemon/scsi.c
+    src/daemon/nbd.c
+    src/daemon/taskmgmt.c
+    src/daemon/persist.c
 )
 
 add_library(iscsid_lib STATIC ${LIB_SOURCES})
@@ -112,6 +120,49 @@ add_test(NAME test_auth COMMAND test_auth)
 add_executable(test_digest tests/test_digest.c)
 target_link_libraries(test_digest PRIVATE iscsid_lib)
 add_test(NAME test_digest COMMAND test_digest)
+
+add_executable(test_async tests/test_async.c)
+target_link_libraries(test_async PRIVATE iscsid_lib)
+add_test(NAME test_async COMMAND test_async)
+
+add_executable(test_recovery tests/test_recovery.c)
+target_link_libraries(test_recovery PRIVATE iscsid_lib)
+add_test(NAME test_recovery COMMAND test_recovery)
+
+add_executable(test_isns tests/test_isns.c)
+target_link_libraries(test_isns PRIVATE iscsid_lib)
+add_test(NAME test_isns COMMAND test_isns)
+
+add_executable(test_scsi tests/test_scsi.c)
+target_link_libraries(test_scsi PRIVATE iscsid_lib)
+add_test(NAME test_scsi COMMAND test_scsi)
+
+add_executable(test_taskmgmt tests/test_taskmgmt.c)
+target_link_libraries(test_taskmgmt PRIVATE iscsid_lib)
+add_test(NAME test_taskmgmt COMMAND test_taskmgmt)
+
+add_executable(test_persist tests/test_persist.c)
+target_link_libraries(test_persist PRIVATE iscsid_lib)
+add_test(NAME test_persist COMMAND test_persist)
+
+add_executable(test_config tests/test_config.c)
+target_link_libraries(test_config PRIVATE iscsid_lib)
+add_test(NAME test_config COMMAND test_config)
+
+add_executable(test_login tests/test_login.c)
+target_link_libraries(test_login PRIVATE iscsid_lib)
+add_test(NAME test_login COMMAND test_login)
+
+add_executable(test_nbd tests/test_nbd.c)
+target_link_libraries(test_nbd PRIVATE iscsid_lib)
+add_test(NAME test_nbd COMMAND test_nbd)
+
+# E2E integration test (requires Docker; skipped if unavailable)
+add_test(NAME e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tests/e2e_test.sh
+         ${CMAKE_BINARY_DIR})
+set_tests_properties(e2e PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
 # Installation

@@ -73,11 +73,14 @@ jobs:
           docker build -t iscsid-mac-target tests/target/
           docker run -d --name iscsi-target --privileged \
             -p 3260:3260 iscsid-mac-target
-          # Wait for tgtd to be ready
-          for i in $(seq 1 15); do
-            nc -z 127.0.0.1 3260 2>/dev/null && echo "Target ready" && break
-            echo "Waiting for target... ($i)"
-            sleep 2
+          # Wait for the IQN target to be configured, not just for the port
+          # to open. tgtd binds port 3260 before entrypoint.sh runs tgtadm,
+          # so nc -z passes too early. Poll tgtadm --mode target instead.
+          for i in $(seq 1 40); do
+            docker exec iscsi-target tgtadm --mode target --op show 2>/dev/null \
+              | grep -q "Target" && echo "Target ready" && break
+            echo "Waiting for target IQN... ($i)"
+            sleep 0.5
           done
           docker logs iscsi-target
 

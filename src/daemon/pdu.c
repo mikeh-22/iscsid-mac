@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#include <syslog.h>
 
 /* -----------------------------------------------------------------------
  * Internal helpers
@@ -192,9 +193,9 @@ int pdu_recv(int fd, iscsi_pdu_t *pdu, int hdr_digest, int data_digest)
         if (rc) return rc;
         uint32_t computed = crc32c(&pdu->hdr, ISCSI_HDR_LEN);
         if (ntohl(received_crc_be) != computed) {
-            fprintf(stderr, "pdu: header digest mismatch "
-                    "(got 0x%08x, expected 0x%08x)\n",
-                    ntohl(received_crc_be), computed);
+            syslog(LOG_ERR, "pdu: header digest mismatch "
+                   "(got 0x%08x, expected 0x%08x)",
+                   ntohl(received_crc_be), computed);
             return -EBADMSG;
         }
     }
@@ -206,8 +207,8 @@ int pdu_recv(int fd, iscsi_pdu_t *pdu, int hdr_digest, int data_digest)
      * RFC 7143 §12 caps MaxRecvDataSegmentLength at 2^24-1 but sane
      * implementations negotiate far lower values.  Hard-limit here. */
     if (dlen > ISCSI_MAX_RECV_SEG_LEN) {
-        fprintf(stderr, "pdu: data segment length %u exceeds maximum %u\n",
-                dlen, ISCSI_MAX_RECV_SEG_LEN);
+        syslog(LOG_ERR, "pdu: data segment length %u exceeds maximum %u",
+               dlen, ISCSI_MAX_RECV_SEG_LEN);
         return -EMSGSIZE;
     }
 
@@ -237,9 +238,9 @@ int pdu_recv(int fd, iscsi_pdu_t *pdu, int hdr_digest, int data_digest)
         /* Digest covers data segment including padding (RFC 7143 §6.7.2) */
         uint32_t computed = crc32c(pdu->data, padded);
         if (ntohl(received_crc_be) != computed) {
-            fprintf(stderr, "pdu: data digest mismatch "
-                    "(got 0x%08x, expected 0x%08x)\n",
-                    ntohl(received_crc_be), computed);
+            syslog(LOG_ERR, "pdu: data digest mismatch "
+                   "(got 0x%08x, expected 0x%08x)",
+                   ntohl(received_crc_be), computed);
             pdu_free_data(pdu);
             return -EBADMSG;
         }
@@ -265,6 +266,7 @@ int pdu_kv_append(char *buf, int buf_size, int used,
 
 const char *pdu_kv_get(const char *buf, uint32_t len, const char *key)
 {
+    if (!buf || len == 0) return NULL;
     size_t klen = strlen(key);
     const char *p = buf;
     const char *end = buf + len;

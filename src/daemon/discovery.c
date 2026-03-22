@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 
 /* -----------------------------------------------------------------------
  * Parse SendTargets response text data
@@ -140,7 +141,7 @@ int iscsi_discover(const char *host, uint16_t port,
     /* Login (discovery session) */
     login_result_t lr = iscsi_login(sess, conn);
     if (lr != LOGIN_OK) {
-        fprintf(stderr, "discover: login failed: %s\n", login_result_str(lr));
+        syslog(LOG_ERR, "discover: login failed: %s", login_result_str(lr));
         session_destroy(sess);
         return -1;
     }
@@ -161,8 +162,8 @@ int iscsi_discover(const char *host, uint16_t port,
 
     int rc = pdu_send(conn->fd, &req_pdu, conn->header_digest, conn->data_digest);
     if (rc) {
-        fprintf(stderr, "discover: send text request failed: %s\n",
-                strerror(-rc));
+        syslog(LOG_ERR, "discover: send text request failed: %s",
+               strerror(-rc));
         session_destroy(sess);
         return rc;
     }
@@ -177,15 +178,15 @@ int iscsi_discover(const char *host, uint16_t port,
         iscsi_pdu_t rsp;
         rc = pdu_recv(conn->fd, &rsp, conn->header_digest, conn->data_digest);
         if (rc) {
-            fprintf(stderr, "discover: recv text response failed\n");
+            syslog(LOG_ERR, "discover: recv text response failed");
             free(text_buf);
             session_destroy(sess);
             return rc;
         }
 
         if ((rsp.hdr.opcode & 0x3f) != ISCSI_OP_TEXT_RSP) {
-            fprintf(stderr, "discover: unexpected opcode 0x%02x\n",
-                    rsp.hdr.opcode & 0x3f);
+            syslog(LOG_ERR, "discover: unexpected opcode 0x%02x",
+                   rsp.hdr.opcode & 0x3f);
             pdu_free_data(&rsp);
             free(text_buf);
             session_destroy(sess);
@@ -200,8 +201,8 @@ int iscsi_discover(const char *host, uint16_t port,
         if (rsp.data_len > 0) {
 #define MAX_DISCOVERY_TEXT 65536u   /* 64 KiB: plenty for any sane target list */
             if (text_len + rsp.data_len > MAX_DISCOVERY_TEXT) {
-                fprintf(stderr, "discover: text response exceeds %u bytes\n",
-                        MAX_DISCOVERY_TEXT);
+                syslog(LOG_WARNING, "discover: text response exceeds %u bytes",
+                       MAX_DISCOVERY_TEXT);
                 pdu_free_data(&rsp);
                 free(text_buf);
                 session_destroy(sess);

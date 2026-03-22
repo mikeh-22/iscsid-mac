@@ -16,12 +16,16 @@
 #define IPC_MAX_MSG_LEN     (64 * 1024)
 
 /* IPC message types (string field "cmd" in JSON) */
-#define IPC_CMD_DISCOVER    "discover"
-#define IPC_CMD_LOGIN       "login"
-#define IPC_CMD_LOGOUT      "logout"
-#define IPC_CMD_LIST        "list"
-#define IPC_CMD_STATUS      "status"
-#define IPC_CMD_PING        "ping"
+#define IPC_CMD_DISCOVER        "discover"
+#define IPC_CMD_ISNS_DISCOVER   "isns-discover"
+#define IPC_CMD_LOGIN           "login"
+#define IPC_CMD_LOGOUT          "logout"
+#define IPC_CMD_ADD_CONN        "add-connection"
+#define IPC_CMD_LUNS            "luns"
+#define IPC_CMD_NBD_SERVE       "nbd-serve"
+#define IPC_CMD_LIST            "list"
+#define IPC_CMD_STATUS          "status"
+#define IPC_CMD_PING            "ping"
 
 /* -----------------------------------------------------------------------
  * Server side

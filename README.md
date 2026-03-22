@@ -197,12 +197,15 @@ Implements [RFC 7143](https://www.rfc-editor.org/rfc/rfc7143) (iSCSI) and [RFC 1
 - CHAP-MD5 (mandatory per RFC 7143) and CHAP-SHA256
 - Mutual CHAP authentication
 - SendTargets discovery sessions
+- iSNS discovery (RFC 4171)
 - Operational parameter negotiation (burst lengths, R2T, ImmediateData, digests, etc.)
+- CRC32C header and data digests (RFC 7143 §6.7)
 - NOP-Out/NOP-In keepalive
 - Logout (close session and close connection reasons)
-- Error Recovery Level 0
+- Error Recovery Level 0 and 1 (connection reconnect within Time2Wait/Time2Retain)
+- Multi-connection session support (add-connection login, MaxConnections negotiation)
 
-**Not yet implemented**: ERL 1/2, iSNS discovery (RFC 4171), multi-connection sessions, header/data CRC32C digests.
+**Not yet implemented**: ERL 2, multi-connection sessions beyond the negotiation layer.
 
 ## DriverKit extension
 
