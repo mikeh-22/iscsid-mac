@@ -19,6 +19,7 @@
 #include "../src/shared/iscsi_protocol.h"
 
 #include <arpa/inet.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,7 +159,7 @@ static void build_data_in(uint8_t hdr[48], uint32_t itt, uint32_t datasn,
 
     *(uint32_t *)(hdr + 16) = htonl(itt);
     *(uint32_t *)(hdr + 24) = htonl(statsn);
-    *(uint32_t *)(hdr + 28) = htonl(datasn);
+    *(uint32_t *)(hdr + 36) = htonl(datasn);   /* datasn at offset 36 in iscsi_data_in_t */
     *(uint32_t *)(hdr + 40) = htonl(bufoffset);
 }
 
@@ -508,6 +509,211 @@ done_fds:
 }
 
 /* -----------------------------------------------------------------------
+ * Test: scsi_decode_sense — fixed-format (0x70) and descriptor-format (0x72)
+ * ----------------------------------------------------------------------- */
+
+static void test_sense_decode_fixed(void)
+{
+    TEST("scsi_decode_sense: fixed-format (0x70) NOT READY / 0x04/0x01");
+
+    /*
+     * iSCSI data segment: 2-byte Sense Length (big-endian) + fixed-format
+     * sense data with:
+     *   byte 0 = 0x70 (current, fixed format)
+     *   byte 2 = 0x02 (sense key = NOT READY)
+     *   byte 12 = 0x04 (ASC)
+     *   byte 13 = 0x01 (ASCQ)
+     */
+    uint8_t data[18] = {0};
+    data[0] = 0x00;   /* Sense Length high byte */
+    data[1] = 14;     /* Sense Length = 14 (bytes 2..15 of fixed format) */
+    data[2] = 0x70;   /* response code: current, fixed */
+    data[4] = 0x02;   /* sense key = NOT READY (byte 2 of sense = data[4]) */
+    data[14] = 0x04;  /* ASC  (byte 12 of sense = data[14]) */
+    data[15] = 0x01;  /* ASCQ (byte 13 of sense = data[15]) */
+
+    scsi_sense_t s;
+    int rc = scsi_decode_sense(data, sizeof(data), &s);
+
+    if (rc != 0)                      { FAIL("decode returned error"); return; }
+    if (s.response_code != 0x70)      { FAIL("wrong response_code"); return; }
+    if (s.sense_key != 0x02)          { FAIL("wrong sense_key"); return; }
+    if (s.asc != 0x04)                { FAIL("wrong ASC"); return; }
+    if (s.ascq != 0x01)               { FAIL("wrong ASCQ"); return; }
+    if (strcmp(scsi_sense_key_str(s.sense_key), "NOT READY") != 0)
+                                      { FAIL("wrong sense key string"); return; }
+    PASS();
+}
+
+static void test_sense_decode_descriptor(void)
+{
+    TEST("scsi_decode_sense: descriptor-format (0x72) ILLEGAL REQUEST");
+
+    /*
+     * Descriptor format:
+     *   byte 0 = 0x72 (current, descriptor format)
+     *   byte 1 = 0x05 (sense key = ILLEGAL REQUEST)
+     *   byte 2 = 0x24 (ASC: INVALID FIELD IN CDB)
+     *   byte 3 = 0x00 (ASCQ)
+     */
+    uint8_t data[6] = {0};
+    data[0] = 0x00;  /* Sense Length high */
+    data[1] = 4;     /* Sense Length = 4 */
+    data[2] = 0x72;  /* response code: descriptor */
+    data[3] = 0x05;  /* sense key = ILLEGAL REQUEST */
+    data[4] = 0x24;  /* ASC */
+    data[5] = 0x00;  /* ASCQ */
+
+    scsi_sense_t s;
+    int rc = scsi_decode_sense(data, sizeof(data), &s);
+
+    if (rc != 0)                 { FAIL("decode returned error"); return; }
+    if (s.sense_key != 0x05)    { FAIL("wrong sense_key"); return; }
+    if (s.asc != 0x24)          { FAIL("wrong ASC"); return; }
+    if (s.ascq != 0x00)         { FAIL("wrong ASCQ"); return; }
+    PASS();
+}
+
+static void test_sense_decode_short(void)
+{
+    TEST("scsi_decode_sense: too-short data → -1");
+
+    uint8_t data[1] = {0x00};
+    scsi_sense_t s;
+    int rc = scsi_decode_sense(data, 1, &s);
+    if (rc == -1) PASS(); else FAIL("expected -1 for 1-byte input");
+}
+
+/* -----------------------------------------------------------------------
+ * Test: DataSN gap — scsi_exec returns -1 on out-of-order DataSN
+ * ----------------------------------------------------------------------- */
+
+static void test_datasn_gap(void)
+{
+    TEST("scsi_exec: DataSN gap (0→2 skip 1) → -1");
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { FAIL("socketpair"); return; }
+
+    iscsi_session_t *sess = make_sess();
+    iscsi_conn_t    *conn = make_conn(sv[0]);
+
+    pid_t pid = fork();
+    if (pid < 0) { FAIL("fork"); goto done_fds; }
+
+    if (pid == 0) {
+        close(sv[0]);
+        /* Drain the SCSI Command PDU (raw 48-byte header) */
+        uint8_t cmd[48];
+        ssize_t got = 0;
+        while (got < 48) {
+            ssize_t r = recv(sv[1], cmd + got, (size_t)(48 - got), 0);
+            if (r <= 0) _exit(1);
+            got += r;
+        }
+        uint32_t itt = ntohl(*(uint32_t *)(cmd + 16));
+
+        uint8_t hdr[48];
+        uint8_t d[8] = {1,2,3,4,5,6,7,8};
+
+        /* First Data-In: DataSN=0, not final */
+        build_data_in(hdr, itt, 0, 0, 8, 0, 0, 0, 1);
+        send_raw_pdu(sv[1], hdr, d, 8);
+
+        /* Second Data-In: DataSN=2 — gap! */
+        build_data_in(hdr, itt, 2, 8, 8, 0, 0, 0, 2);
+        send_raw_pdu(sv[1], hdr, d, 8);
+
+        close(sv[1]);
+        _exit(0);
+    }
+
+    close(sv[1]);
+    sv[1] = -1;
+
+    uint8_t lun[8] = {0};
+    uint8_t cdb[10] = {0x28, 0,0,0,0,0,0,0,2,0};  /* READ(10) 2 blocks */
+    uint8_t buf[16] = {0};
+    uint32_t inlen = 16;
+
+    int rc = scsi_exec(sess, conn, lun, cdb, 10, SCSI_DIR_READ,
+                        NULL, 0, buf, &inlen);
+    int failed = 0;
+    if (rc != -1) { FAIL("expected -1 on DataSN gap"); failed = 1; }
+
+    int st;
+    waitpid(pid, &st, 0);
+    if (!failed) PASS();
+
+done_fds:
+    free(conn);
+    session_destroy(sess);
+    if (sv[0] >= 0) close(sv[0]);
+    if (sv[1] >= 0) close(sv[1]);
+}
+
+/* -----------------------------------------------------------------------
+ * Test: CmdSN window — session_next_cmdsn blocks when window full
+ * ----------------------------------------------------------------------- */
+
+typedef struct {
+    iscsi_session_t *sess;
+    uint32_t         sn;
+    int              done;
+} cmdsn_arg_t;
+
+static void *cmdsn_thread(void *arg)
+{
+    cmdsn_arg_t *a = arg;
+    a->sn = session_next_cmdsn(a->sess);
+    a->done = 1;
+    return NULL;
+}
+
+static void test_cmdsn_window(void)
+{
+    TEST("session_next_cmdsn: blocks when window full, unblocks on advance");
+
+    iscsi_session_t *sess = make_sess();
+
+    /* Close the window: max_cmd_sn = 0, cmd_sn = 1 → (int32_t)(1-0) > 0 */
+    pthread_mutex_lock(&sess->lock);
+    sess->max_cmd_sn = 0;
+    sess->cmd_sn     = 1;
+    pthread_mutex_unlock(&sess->lock);
+
+    cmdsn_arg_t arg = {.sess = sess, .sn = 0, .done = 0};
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, cmdsn_thread, &arg) != 0) {
+        FAIL("pthread_create");
+        session_destroy(sess);
+        return;
+    }
+
+    /* Give the thread time to reach the cond_wait */
+    struct timespec ts = {0, 50000000};   /* 50 ms */
+    nanosleep(&ts, NULL);
+
+    if (arg.done) {
+        FAIL("thread returned without blocking");
+        pthread_join(tid, NULL);
+        session_destroy(sess);
+        return;
+    }
+
+    /* Advance the window: max_cmd_sn = 2 → thread can issue CmdSN=1 */
+    session_update_sn(sess, 0, 1, 2);
+
+    pthread_join(tid, NULL);
+
+    if (!arg.done)      { FAIL("thread did not complete after window advance"); }
+    else if (arg.sn != 1) { FAIL("expected CmdSN=1"); }
+    else                  { PASS(); }
+
+    session_destroy(sess);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -521,6 +727,11 @@ int main(void)
     test_read_split_data_in();
     test_check_condition();
     test_sync_cache10();
+    test_sense_decode_fixed();
+    test_sense_decode_descriptor();
+    test_sense_decode_short();
+    test_datasn_gap();
+    test_cmdsn_window();
 
     printf("\n%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

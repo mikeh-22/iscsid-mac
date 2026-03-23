@@ -116,6 +116,13 @@ struct iscsi_session {
      */
     pthread_cond_t  scsi_recovery_cond;
 
+    /*
+     * cmd_window_cond: broadcast under sess->lock whenever max_cmd_sn advances.
+     * session_next_cmdsn() waits on this when the CmdSN window is full
+     * (RFC 7143 §3.6, serial arithmetic per RFC 1982).
+     */
+    pthread_cond_t  cmd_window_cond;
+
     /* Linked list */
     struct iscsi_session *next;
 };
