@@ -87,13 +87,20 @@ iscsi_session_t *session_create(sess_type_t type,
     sess->params.error_recovery_level = ISCSI_DEFAULT_ERROR_RECOVERY_LEVEL;
 
     /* Start CmdSN, ITT, and CID allocators */
-    sess->cmd_sn   = 1;
-    sess->next_itt = 1;
-    sess->next_cid = 1;
+    sess->cmd_sn     = 1;
+    sess->next_itt   = 1;
+    sess->next_cid   = 1;
+    /*
+     * Open the CmdSN window wide until login narrows it.  Without this, any
+     * call to session_next_cmdsn() before the first Login Response (which
+     * carries MaxCmdSN) would block forever.
+     */
+    sess->max_cmd_sn = 0x7FFFFFFFu;
 
     pthread_mutex_init(&sess->lock, NULL);
     pthread_cond_init(&sess->recovery_done, NULL);
     pthread_cond_init(&sess->scsi_recovery_cond, NULL);
+    pthread_cond_init(&sess->cmd_window_cond, NULL);
 
     if (isid_random(sess->isid) != 0) {
         free(sess);
@@ -117,6 +124,7 @@ void session_destroy(iscsi_session_t *sess)
     secure_zero(sess->chap_secret,        sizeof(sess->chap_secret));
     secure_zero(sess->chap_target_secret, sizeof(sess->chap_target_secret));
     secure_zero(sess->chap_username,      sizeof(sess->chap_username));
+    pthread_cond_destroy(&sess->cmd_window_cond);
     pthread_cond_destroy(&sess->scsi_recovery_cond);
     pthread_cond_destroy(&sess->recovery_done);
     pthread_mutex_destroy(&sess->lock);
@@ -163,6 +171,17 @@ iscsi_conn_t *session_lead_conn(iscsi_session_t *sess)
 uint32_t session_next_cmdsn(iscsi_session_t *sess)
 {
     pthread_mutex_lock(&sess->lock);
+    /*
+     * RFC 7143 §3.6 / RFC 1982 serial arithmetic: CmdSN must not exceed
+     * MaxCmdSN.  Block until the target advances the window (via a PDU
+     * carrying a larger MaxCmdSN that session_update_sn() will broadcast).
+     *
+     * The signed comparison detects both the normal case (window full) and
+     * the wrap-around case correctly because CmdSN and MaxCmdSN are in the
+     * same 32-bit serial number space.
+     */
+    while ((int32_t)(sess->cmd_sn - sess->max_cmd_sn) > 0)
+        pthread_cond_wait(&sess->cmd_window_cond, &sess->lock);
     uint32_t sn = sess->cmd_sn++;
     pthread_mutex_unlock(&sess->lock);
     return sn;
@@ -174,7 +193,11 @@ void session_update_sn(iscsi_session_t *sess,
 {
     pthread_mutex_lock(&sess->lock);
     sess->exp_cmd_sn = expcmdsn;
-    sess->max_cmd_sn = maxcmdsn;
+    /* Only advance the window; targets must not shrink MaxCmdSN (RFC 7143 §3.6) */
+    if ((int32_t)(maxcmdsn - sess->max_cmd_sn) > 0) {
+        sess->max_cmd_sn = maxcmdsn;
+        pthread_cond_broadcast(&sess->cmd_window_cond);
+    }
     pthread_mutex_unlock(&sess->lock);
 }
 

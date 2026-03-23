@@ -25,6 +25,31 @@
 #define SCSI_STATUS_BUSY            0x08
 #define SCSI_STATUS_TASK_ABORTED    0x40
 
+/* Decoded SCSI sense data */
+typedef struct {
+    uint8_t  response_code;  /* 0x70/0x71 = fixed, 0x72/0x73 = descriptor */
+    uint8_t  sense_key;      /* sense key bits [3:0] */
+    uint8_t  asc;            /* Additional Sense Code */
+    uint8_t  ascq;           /* Additional Sense Code Qualifier */
+} scsi_sense_t;
+
+/*
+ * Decode SCSI sense data from an iSCSI SCSI Response data segment.
+ *
+ * The iSCSI data segment for a SCSI Response wraps sense data with a 2-byte
+ * big-endian Sense Length field (RFC 7143 §10.4.7) preceding the raw SCSI
+ * sense bytes.  Both fixed-format (0x70/0x71) and descriptor-format
+ * (0x72/0x73) response codes are handled.
+ *
+ * Returns 0 on success, -1 if the data is too short or the response code is
+ * unrecognised.
+ */
+int scsi_decode_sense(const uint8_t *data, uint32_t data_len,
+                      scsi_sense_t *out);
+
+/* Human-readable sense key name (e.g. "NOT READY"). Always non-NULL. */
+const char *scsi_sense_key_str(uint8_t sense_key);
+
 /* Transfer direction */
 #define SCSI_DIR_NONE   0
 #define SCSI_DIR_READ   1

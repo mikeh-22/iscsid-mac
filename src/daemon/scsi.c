@@ -30,6 +30,50 @@
 #include <syslog.h>
 
 /* -----------------------------------------------------------------------
+ * Sense data decoding
+ * ----------------------------------------------------------------------- */
+
+static const char *const sense_key_names[16] = {
+    "NO SENSE",        "RECOVERED ERROR", "NOT READY",       "MEDIUM ERROR",
+    "HARDWARE ERROR",  "ILLEGAL REQUEST", "UNIT ATTENTION",  "DATA PROTECT",
+    "BLANK CHECK",     "VENDOR SPECIFIC", "COPY ABORTED",    "ABORTED COMMAND",
+    "OBSOLETE",        "VOLUME OVERFLOW",  "MISCOMPARE",      "COMPLETED",
+};
+
+const char *scsi_sense_key_str(uint8_t sense_key)
+{
+    return sense_key_names[sense_key & 0x0f];
+}
+
+int scsi_decode_sense(const uint8_t *data, uint32_t data_len,
+                      scsi_sense_t *out)
+{
+    /* iSCSI wraps sense data with a 2-byte big-endian Sense Length prefix */
+    if (data_len < 2) return -1;
+    uint16_t sense_len = ((uint16_t)data[0] << 8) | data[1];
+    if (sense_len == 0 || data_len < (uint32_t)(2 + sense_len)) return -1;
+
+    const uint8_t *s = data + 2;
+    uint8_t rc = s[0] & 0x7f;
+    out->response_code = rc;
+
+    if (rc == 0x70 || rc == 0x71) {
+        /* Fixed format: sense key at byte 2 bits [3:0], ASC at 12, ASCQ at 13 */
+        out->sense_key = (sense_len >= 3) ? (s[2] & 0x0f) : 0;
+        out->asc       = (sense_len >= 13) ? s[12] : 0;
+        out->ascq      = (sense_len >= 14) ? s[13] : 0;
+    } else if (rc == 0x72 || rc == 0x73) {
+        /* Descriptor format: sense key at byte 1, ASC at 2, ASCQ at 3 */
+        out->sense_key = (sense_len >= 2) ? (s[1] & 0x0f) : 0;
+        out->asc       = (sense_len >= 3) ? s[2] : 0;
+        out->ascq      = (sense_len >= 4) ? s[3] : 0;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * scsi_report_luns — enumerate LUNs on the target
  * ----------------------------------------------------------------------- */
 
@@ -226,6 +270,7 @@ static int scsi_exec_once(iscsi_session_t *sess, iscsi_conn_t *conn,
 
     /* ---- Receive loop: process R2T, Data-In, SCSI Response ---- */
     uint32_t data_in_received = 0;
+    uint32_t expected_datasn  = 0;   /* DataPDUInOrder=Yes: must be strictly sequential */
 
     for (;;) {
         iscsi_pdu_t rsp;
@@ -272,6 +317,16 @@ static int scsi_exec_once(iscsi_session_t *sess, iscsi_conn_t *conn,
             uint32_t bufoffset = ntohl(din->bufoffset);
             int      final     = (din->flags & ISCSI_FLAG_FINAL) != 0;
             int      has_status = (din->flags & 0x01) != 0;  /* S bit */
+
+            /* DataPDUInOrder=Yes: DataSN must increment by 1 per PDU */
+            uint32_t got_datasn = ntohl(din->datasn);
+            if (got_datasn != expected_datasn) {
+                syslog(LOG_ERR, "scsi: DataSN gap: expected %u got %u",
+                       expected_datasn, got_datasn);
+                pdu_free_data(&rsp);
+                return -1;
+            }
+            expected_datasn++;
 
             session_update_sn(sess, ntohl(din->statsn),
                               ntohl(din->expcmdsn), ntohl(din->maxcmdsn));
@@ -338,6 +393,17 @@ static int scsi_exec_once(iscsi_session_t *sess, iscsi_conn_t *conn,
             }
 
             uint8_t status = srsp->status;
+
+            if (status == SCSI_STATUS_CHECK_CONDITION && rsp.data_len > 0) {
+                scsi_sense_t sense = {0};
+                if (scsi_decode_sense(rsp.data, rsp.data_len, &sense) == 0) {
+                    syslog(LOG_WARNING,
+                           "scsi: CHECK CONDITION key=0x%02x(%s) "
+                           "asc=0x%02x ascq=0x%02x",
+                           sense.sense_key, scsi_sense_key_str(sense.sense_key),
+                           sense.asc, sense.ascq);
+                }
+            }
 
             if (dir == SCSI_DIR_READ && data_in_len)
                 *data_in_len = data_in_received;
